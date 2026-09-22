@@ -36,6 +36,13 @@ type SignInRequest struct {
 	Password string `json:"password"`
 }
 
+// UpdateFCMTokenRequest replaces the caller's push token wholesale -- there
+// is only ever one live token per account (the most recent app install/
+// reinstall), so partial updates make no sense here.
+type UpdateFCMTokenRequest struct {
+	Token string `json:"token"`
+}
+
 type AuthResponse struct {
 	User  User   `json:"user"`
 	Token string `json:"token"`

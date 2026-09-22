@@ -97,3 +97,25 @@ func (r *Repository) UpdateProfile(u User) error {
 	}
 	return nil
 }
+
+// UpdateFCMToken saves the caller's current push registration token, so an
+// SOS from someone who has linked this account as a trusted contact can
+// reach this device with an alarm push. token == "" clears it (e.g. on
+// sign-out), so a stale token from a previous install never gets pushed to.
+func (r *Repository) UpdateFCMToken(uid, token string) error {
+	res, err := r.db.Exec(`UPDATE users SET fcm_token = ? WHERE uid = ?`, nullIfEmpty(token), uid)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}

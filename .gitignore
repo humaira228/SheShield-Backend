@@ -2,3 +2,4 @@
 .env
 sheshield-backend
 .env.txt
+firebase-service-account.json

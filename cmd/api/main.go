@@ -10,6 +10,7 @@ import (
 	"github.com/zannatulmaliha/sheshield-backend/internal/contact"
 	"github.com/zannatulmaliha/sheshield-backend/internal/db"
 	"github.com/zannatulmaliha/sheshield-backend/internal/helper"
+	"github.com/zannatulmaliha/sheshield-backend/internal/push"
 	"github.com/zannatulmaliha/sheshield-backend/internal/sms"
 	"github.com/zannatulmaliha/sheshield-backend/internal/verification"
 )
@@ -46,8 +47,19 @@ func main() {
 	if !sender.Live() {
 		log.Println("SMS: log-only mode -- the server does NOT send real texts (alerts are recorded, messages are only printed here). Set SMS_PROVIDER once a provider is configured.")
 	}
-	alertService := alert.NewService(authRepo, contactRepo, alert.NewRepository(conn), sender)
-	alert.NewHandler(alertService).Register(mux, cfg.JWTSecret)
+
+	pusher, err := push.New(cfg.PushProvider, cfg.FCMCredentialsPath, cfg.FCMProjectID)
+	if err != nil {
+		log.Fatalf("push: %v", err)
+	}
+	if !pusher.Live() {
+		log.Println("Push: log-only mode -- linked trusted contacts do NOT get an alarm push (only printed here). Set PUSH_PROVIDER=fcm with FCM_CREDENTIALS_PATH/FCM_PROJECT_ID once a Firebase project is configured.")
+	}
+
+	alertService := alert.NewService(authRepo, contactRepo, alert.NewRepository(conn), sender, pusher, cfg.PublicBaseURL)
+	alertHandler := alert.NewHandler(alertService)
+	alertHandler.Register(mux, cfg.JWTSecret)
+	alertHandler.RegisterPublic(mux) // no-login tracking page + its JSON feed -- deliberately outside RequireAuth
 
 	verificationService := verification.NewService(authRepo, verification.NewRepository(conn), cfg.UploadDir)
 	verification.NewHandler(verificationService).Register(mux, cfg.JWTSecret)

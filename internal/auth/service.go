@@ -126,3 +126,8 @@ func (s *Service) UpdateProfile(uid string, req UpdateProfileRequest) (User, err
 	}
 	return updated, nil
 }
+
+// UpdateFCMToken records the caller's current push token.
+func (s *Service) UpdateFCMToken(uid, token string) error {
+	return s.repo.UpdateFCMToken(uid, token)
+}

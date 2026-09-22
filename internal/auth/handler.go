@@ -24,6 +24,7 @@ func (h *Handler) Register(mux *http.ServeMux, jwtSecret string) {
 	requireAuth := middleware.RequireAuth(jwtSecret)
 	mux.Handle("GET /api/v1/auth/me", requireAuth(http.HandlerFunc(h.me)))
 	mux.Handle("PATCH /api/v1/auth/me", requireAuth(http.HandlerFunc(h.updateMe)))
+	mux.Handle("PATCH /api/v1/auth/fcm-token", requireAuth(http.HandlerFunc(h.updateFCMToken)))
 }
 
 func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
@@ -87,4 +88,18 @@ func (h *Handler) updateMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, user)
+}
+
+func (h *Handler) updateFCMToken(w http.ResponseWriter, r *http.Request) {
+	uid, _ := middleware.UIDFromContext(r.Context())
+	var req UpdateFCMTokenRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Err(w, http.StatusBadRequest, "Invalid request body.")
+		return
+	}
+	if err := h.service.UpdateFCMToken(uid, req.Token); err != nil {
+		httpx.Err(w, http.StatusInternalServerError, "Could not save push token.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]bool{"updated": true})
 }
