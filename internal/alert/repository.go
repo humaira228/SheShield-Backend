@@ -166,6 +166,51 @@ func (r *Repository) Resolve(alertID, ownerUID string) error {
 	return r.notActiveOrNotFound(alertID, ownerUID)
 }
 
+// ListByUser returns the caller's own past SOS alerts, most recent first --
+// the backing query for the Flutter app's notification-history screen.
+// Delivery counts are aggregated in SQL (rather than loading every
+// alert_deliveries row into Go) since the list view only ever needs a
+// "reached N of M" summary, never the per-contact breakdown Alert.Deliveries
+// carries for a just-sent alert.
+func (r *Repository) ListByUser(uid string) ([]AlertSummary, error) {
+	rows, err := r.db.Query(`
+		SELECT
+			a.id, a.status, a.created_at, a.resolved_at,
+			COUNT(CASE WHEN d.status IN ('sent', 'simulated') THEN 1 END),
+			COUNT(CASE WHEN d.status = 'failed' THEN 1 END),
+			COUNT(d.id)
+		FROM alerts a
+		LEFT JOIN alert_deliveries d ON d.alert_id = a.id
+		WHERE a.user_uid = ?
+		GROUP BY a.id
+		ORDER BY a.created_at DESC
+		LIMIT 50`, uid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	summaries := []AlertSummary{}
+	for rows.Next() {
+		var s AlertSummary
+		var createdAt string
+		var resolvedAt sql.NullString
+		if err := rows.Scan(&s.ID, &s.Status, &createdAt, &resolvedAt, &s.SentCount, &s.FailedCount, &s.TotalCount); err != nil {
+			return nil, err
+		}
+		s.CreatedAt = parseTime(createdAt)
+		if resolvedAt.Valid {
+			t := parseTime(resolvedAt.String)
+			s.ResolvedAt = &t
+		}
+		summaries = append(summaries, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return summaries, nil
+}
+
 // GetByShareToken is the one read the public, no-login tracking page is
 // allowed: it joins to users only for a first name, and never selects phone,
 // email, or any other column that could identify the sender further.

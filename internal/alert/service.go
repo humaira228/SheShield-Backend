@@ -41,6 +41,7 @@ type Store interface {
 	UpdateLocation(alertID, ownerUID string, lat, lng, accuracy *float64) error
 	Resolve(alertID, ownerUID string) error
 	GetByShareToken(token string) (*PublicAlertView, error)
+	ListByUser(uid string) ([]AlertSummary, error)
 }
 
 type Service struct {
@@ -202,6 +203,12 @@ func (s *Service) UpdateLocation(alertID, ownerUID string, lat, lng, accuracy *f
 // the tracking page should stop showing it as live.
 func (s *Service) Resolve(alertID, ownerUID string) error {
 	return s.store.Resolve(alertID, ownerUID)
+}
+
+// ListMine returns the caller's own SOS history, most recent first -- the
+// notification-history list in the app.
+func (s *Service) ListMine(uid string) ([]AlertSummary, error) {
+	return s.store.ListByUser(uid)
 }
 
 // PublicView returns what the no-login tracking page may show for a share

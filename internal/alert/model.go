@@ -63,6 +63,23 @@ type UpdateLocationRequest struct {
 	AccuracyMeters *float64 `json:"accuracyMeters"`
 }
 
+// AlertSummary is one row of GET /api/v1/alerts (a user's own SOS history) --
+// enough for a notification-style list (when, whether it's still active, how
+// many contacts were reached) without the exact coordinates the full Alert
+// type would carry. Deliberately its own type rather than reusing Alert: the
+// two endpoints have different privacy/shape needs (see PublicAlertView for
+// the same reasoning), and Alert's hidden fields (UserUID, Latitude, ...)
+// exist for the create-response case, not this one.
+type AlertSummary struct {
+	ID          string     `json:"id"`
+	Status      string     `json:"status"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	ResolvedAt  *time.Time `json:"resolvedAt,omitempty"`
+	SentCount   int        `json:"sentCount"`
+	FailedCount int        `json:"failedCount"`
+	TotalCount  int        `json:"totalCount"`
+}
+
 // PublicAlertView is everything the no-login tracking page may show a
 // contact: enough to render a live map and know the SOS is still ongoing,
 // nothing that could identify the sender beyond a first name -- no phone

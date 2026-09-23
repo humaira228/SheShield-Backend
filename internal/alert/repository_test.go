@@ -194,3 +194,47 @@ func TestGetByShareToken_ReturnsOnlyPublicFields(t *testing.T) {
 		t.Errorf("public view must never include phone number or last name, got: %s", data)
 	}
 }
+
+func TestListByUser_OnlyOwnAlertsWithDeliveryCounts(t *testing.T) {
+	conn := openTestDB(t)
+	seedUser(t, conn, "victim1", "Nadia Islam", "1712345678")
+	seedUser(t, conn, "someoneElse", "Other Person", "1799999998")
+	seedAlert(t, conn, "alert1", "victim1", "resolved", "tok-1")
+	seedAlert(t, conn, "alert2", "victim1", "active", "tok-2")
+	seedAlert(t, conn, "alert3", "someoneElse", "active", "tok-3")
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	seedDelivery := func(alertID, status string) {
+		if _, err := conn.Exec(`
+			INSERT INTO alert_deliveries (id, alert_id, contact_id, name, phone, channel, status, error, created_at)
+			VALUES (?, ?, 'c1', 'Contact', '+8801700000000', 'server', ?, '', ?)`,
+			newID(), alertID, status, now,
+		); err != nil {
+			t.Fatalf("seed delivery: %v", err)
+		}
+	}
+	seedDelivery("alert1", "sent")
+	seedDelivery("alert1", "failed")
+
+	repo := NewRepository(conn)
+	got, err := repo.ListByUser("victim1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want only victim1's 2 alerts, got %d: %+v", len(got), got)
+	}
+
+	byID := map[string]AlertSummary{got[0].ID: got[0], got[1].ID: got[1]}
+	if _, ok := byID["alert3"]; ok {
+		t.Errorf("must not include another user's alert")
+	}
+	a1 := byID["alert1"]
+	if a1.SentCount != 1 || a1.FailedCount != 1 || a1.TotalCount != 2 {
+		t.Errorf("want 1 sent, 1 failed, 2 total for alert1, got %+v", a1)
+	}
+	a2 := byID["alert2"]
+	if a2.SentCount != 0 || a2.FailedCount != 0 || a2.TotalCount != 0 {
+		t.Errorf("want zero counts for alert2 (no deliveries seeded), got %+v", a2)
+	}
+}

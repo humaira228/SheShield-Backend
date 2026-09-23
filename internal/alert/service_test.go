@@ -33,6 +33,9 @@ type fakeStore struct {
 
 	publicView    *PublicAlertView
 	publicViewErr error
+
+	list    []AlertSummary
+	listErr error
 }
 
 func (f *fakeStore) Save(a Alert) error {
@@ -66,6 +69,13 @@ func (f *fakeStore) GetByShareToken(token string) (*PublicAlertView, error) {
 		return nil, f.publicViewErr
 	}
 	return f.publicView, nil
+}
+
+func (f *fakeStore) ListByUser(uid string) ([]AlertSummary, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.list, nil
 }
 
 type fakeSender struct {
@@ -332,5 +342,27 @@ func TestPublicView_NotFound(t *testing.T) {
 	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, "http://localhost:8080")
 	if _, err := svc.PublicView("garbage"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestListMine_ReturnsStoreResult(t *testing.T) {
+	want := []AlertSummary{{ID: "a1", Status: "resolved"}}
+	store := &fakeStore{list: want}
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, "http://localhost:8080")
+
+	got, err := svc.ListMine("victim1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "a1" {
+		t.Errorf("ListMine should pass through the store's result unchanged, got %+v", got)
+	}
+}
+
+func TestListMine_PassesThroughStoreErrors(t *testing.T) {
+	store := &fakeStore{listErr: errors.New("db down")}
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, "http://localhost:8080")
+	if _, err := svc.ListMine("victim1"); err == nil {
+		t.Fatal("want an error when the store fails")
 	}
 }

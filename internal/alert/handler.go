@@ -20,6 +20,7 @@ func NewHandler(svc *Service) *Handler {
 func (h *Handler) Register(mux *http.ServeMux, jwtSecret string) {
 	auth := middleware.RequireAuth(jwtSecret)
 	mux.Handle("POST /api/v1/alerts", auth(http.HandlerFunc(h.create)))
+	mux.Handle("GET /api/v1/alerts", auth(http.HandlerFunc(h.listMine)))
 	mux.Handle("PATCH /api/v1/alerts/{id}/location", auth(http.HandlerFunc(h.updateLocation)))
 	mux.Handle("PATCH /api/v1/alerts/{id}/resolve", auth(http.HandlerFunc(h.resolve)))
 }
@@ -58,6 +59,20 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusCreated, alert)
+}
+
+// listMine returns the caller's own SOS history for the app's
+// notification-history screen. There is no error case beyond a DB failure --
+// an account with no alerts yet just gets an empty list.
+func (h *Handler) listMine(w http.ResponseWriter, r *http.Request) {
+	uid, _ := middleware.UIDFromContext(r.Context())
+
+	alerts, err := h.svc.ListMine(uid)
+	if err != nil {
+		httpx.Err(w, http.StatusInternalServerError, "Could not load your alerts.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, alerts)
 }
 
 // writeTrackingError maps the sentinel errors UpdateLocation/Resolve can
