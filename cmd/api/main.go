@@ -5,12 +5,17 @@ import (
 	"net/http"
 
 	"github.com/zannatulmaliha/sheshield-backend/internal/alert"
+	"github.com/zannatulmaliha/sheshield-backend/internal/audit"
 	"github.com/zannatulmaliha/sheshield-backend/internal/auth"
 	"github.com/zannatulmaliha/sheshield-backend/internal/config"
 	"github.com/zannatulmaliha/sheshield-backend/internal/contact"
 	"github.com/zannatulmaliha/sheshield-backend/internal/db"
+	"github.com/zannatulmaliha/sheshield-backend/internal/duress"
 	"github.com/zannatulmaliha/sheshield-backend/internal/helper"
+	"github.com/zannatulmaliha/sheshield-backend/internal/matching"
 	"github.com/zannatulmaliha/sheshield-backend/internal/push"
+	"github.com/zannatulmaliha/sheshield-backend/internal/ratelimit"
+	"github.com/zannatulmaliha/sheshield-backend/internal/report"
 	"github.com/zannatulmaliha/sheshield-backend/internal/sms"
 	"github.com/zannatulmaliha/sheshield-backend/internal/verification"
 )
@@ -56,7 +61,31 @@ func main() {
 		log.Println("Push: log-only mode -- linked trusted contacts do NOT get an alarm push (only printed here). Set PUSH_PROVIDER=fcm with FCM_CREDENTIALS_PATH/FCM_PROJECT_ID once a Firebase project is configured.")
 	}
 
-	alertService := alert.NewService(authRepo, contactRepo, alert.NewRepository(conn), sender, pusher, cfg.PublicBaseURL)
+	// Trust & safety core: audit trail, moderation queue (reports/blocks),
+	// the sos_matches locking table, duress signals, and the review-gated
+	// SOS rate limiter. See internal/db/migrations/009-014 for the schema
+	// and each package's doc comment for the spec section it implements.
+	auditLog := audit.NewLogger(conn)
+	matchesRepo := matching.NewRepository(conn)
+	duressRepo := duress.NewRepository(conn)
+	rateLimitsRepo := ratelimit.NewRepository(conn)
+	alertRepo := alert.NewRepository(conn)
+
+	reportService := report.NewService(report.NewRepository(conn), auditLog, rateLimitsRepo, alertRepo)
+	report.NewHandler(reportService).Register(mux, cfg.JWTSecret)
+
+	// flagAdapter lets alert.Service file a system report (an automated
+	// rate-limit threshold crossing) without alert importing report's full
+	// API -- see alert.FlaggerFunc's doc comment.
+	flagAdapter := alert.FlaggerFunc(func(reportedID, category, sosID string) error {
+		_, err := reportService.FileSystemFlag(reportedID, category, sosID)
+		return err
+	})
+
+	alertService := alert.NewService(
+		authRepo, contactRepo, alertRepo, sender, pusher,
+		duressRepo, rateLimitsRepo, flagAdapter, cfg.PublicBaseURL,
+	)
 	alertHandler := alert.NewHandler(alertService)
 	alertHandler.Register(mux, cfg.JWTSecret)
 	alertHandler.RegisterPublic(mux) // no-login tracking page + its JSON feed -- deliberately outside RequireAuth
@@ -65,7 +94,8 @@ func main() {
 	verification.NewHandler(verificationService).Register(mux, cfg.JWTSecret)
 
 	helperRepo := helper.NewRepository(conn)
-	helperService := helper.NewService(authRepo, helperRepo, helperRepo)
+	helperService := helper.NewService(authRepo, helperRepo, helperRepo, matchesRepo).
+		WithMutualConnections(authRepo, contactRepo) // §10: authRepo.IsDiscoverable + contactRepo.AreConnected
 	helper.NewHandler(helperService).Register(mux, cfg.JWTSecret)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {

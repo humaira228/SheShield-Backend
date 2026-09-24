@@ -86,10 +86,10 @@ func (r *Repository) Save(a Alert) error {
 	at := a.CreatedAt.Format(time.RFC3339)
 	updatedAt := a.UpdatedAt.Format(time.RFC3339)
 	if _, err := tx.Exec(`
-		INSERT INTO alerts (id, user_uid, latitude, longitude, accuracy_m, created_at, share_token, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO alerts (id, user_uid, latitude, longitude, accuracy_m, created_at, share_token, updated_at, av_consent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.UserUID, nullable(a.Latitude), nullable(a.Longitude), nullable(a.AccuracyMeters), at,
-		nullableString(a.ShareToken), updatedAt,
+		nullableString(a.ShareToken), updatedAt, a.AVConsent,
 	); err != nil {
 		return err
 	}
@@ -145,25 +145,96 @@ func (r *Repository) UpdateLocation(alertID, ownerUID string, lat, lng, accuracy
 	return r.notActiveOrNotFound(alertID, ownerUID)
 }
 
+// quickCancelWindow: a resolve this soon after creation is treated as a
+// self-correction/cancel for sos_rate_limits purposes (see
+// internal/ratelimit), rather than a genuine "I made it through the
+// emergency safely." This is a server-side proxy for the spec's client-side
+// "10s cancelable countdown" (which happens before Trigger is ever called,
+// so there's nothing server-side to cancel at that point) -- it exists to
+// catch the same risk pattern (create-then-immediately-cancel) the countdown
+// itself can't, once an alert has actually been persisted.
+const quickCancelWindow = 30 * time.Second
+
 // Resolve marks an alert 'resolved' -- the sender saying they're safe. Like
 // UpdateLocation, it only ever moves an alert out of 'active', so resolving
 // twice is safe: the second call simply finds the alert no longer active and
-// returns ErrAlertNotActive, without touching resolved_at again.
-func (r *Repository) Resolve(alertID, ownerUID string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := r.db.Exec(`
-		UPDATE alerts
-		SET status = 'resolved', resolved_at = ?, updated_at = ?
-		WHERE id = ? AND user_uid = ? AND status = 'active'`,
-		now, now, alertID, ownerUID,
-	)
+// returns ErrAlertNotActive, without touching resolved_at again. The
+// returned bool is wasQuickCancel -- see quickCancelWindow.
+func (r *Repository) Resolve(alertID, ownerUID string) (bool, error) {
+	tx, err := r.db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		return nil
+	defer tx.Rollback() // no-op once Commit succeeds
+
+	var createdAtStr string
+	err = tx.QueryRow(
+		`SELECT created_at FROM alerts WHERE id = ? AND user_uid = ? AND status = 'active'`,
+		alertID, ownerUID,
+	).Scan(&createdAtStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Roll back explicitly (not just via the deferred call) before this
+		// falls through to notActiveOrNotFound -- that uses r.db, not tx, and
+		// this connection pool has exactly one connection (see internal/db's
+		// SetMaxOpenConns(1)). Calling it while tx is still open would
+		// deadlock waiting for a connection tx itself is holding.
+		_ = tx.Rollback()
+		return false, r.notActiveOrNotFound(alertID, ownerUID)
 	}
-	return r.notActiveOrNotFound(alertID, ownerUID)
+	if err != nil {
+		return false, err
+	}
+
+	now := time.Now().UTC()
+	nowStr := now.Format(time.RFC3339)
+	if _, err := tx.Exec(`
+		UPDATE alerts SET status = 'resolved', resolved_at = ?, updated_at = ?
+		WHERE id = ?`,
+		nowStr, nowStr, alertID,
+	); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+
+	return now.Sub(parseTime(createdAtStr)) < quickCancelWindow, nil
+}
+
+// CurrentLocation returns an SOS's last-known coordinates, e.g. for a
+// duress-signal push that needs somewhere to point the map at even though
+// the triggering client didn't (and shouldn't have to) resend location.
+func (r *Repository) CurrentLocation(sosID string) (*float64, *float64, error) {
+	var lat, lng sql.NullFloat64
+	err := r.db.QueryRow(`SELECT latitude, longitude FROM alerts WHERE id = ?`, sosID).Scan(&lat, &lng)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	var latP, lngP *float64
+	if lat.Valid {
+		v := lat.Float64
+		latP = &v
+	}
+	if lng.Valid {
+		v := lng.Float64
+		lngP = &v
+	}
+	return latP, lngP, nil
+}
+
+// RequesterFor resolves an sos_id to its requester's uid -- satisfies
+// internal/report.SOSOwners, so a moderator marking a report's underlying
+// SOS 'false' knows whose sos_rate_limits counter to bump.
+func (r *Repository) RequesterFor(sosID string) (string, error) {
+	var uid string
+	err := r.db.QueryRow(`SELECT user_uid FROM alerts WHERE id = ?`, sosID).Scan(&uid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return uid, err
 }
 
 // ListByUser returns the caller's own past SOS alerts, most recent first --
@@ -211,22 +282,27 @@ func (r *Repository) ListByUser(uid string) ([]AlertSummary, error) {
 	return summaries, nil
 }
 
+// connectivityLostAfter: no location update in this long while the SOS is
+// still 'accepted' is surfaced as ConnectivityLost -- see the spec's §8.
+const connectivityLostAfter = 60 * time.Second
+
 // GetByShareToken is the one read the public, no-login tracking page is
 // allowed: it joins to users only for a first name, and never selects phone,
 // email, or any other column that could identify the sender further.
 func (r *Repository) GetByShareToken(token string) (*PublicAlertView, error) {
 	row := r.db.QueryRow(`
-		SELECT a.latitude, a.longitude, a.accuracy_m, a.status, a.updated_at, u.name
+		SELECT a.id, a.latitude, a.longitude, a.accuracy_m, a.status, a.updated_at, u.name
 		FROM alerts a
 		JOIN users u ON u.uid = a.user_uid
 		WHERE a.share_token = ?`, token,
 	)
 
 	var v PublicAlertView
+	var alertID string
 	var lat, lng, acc sql.NullFloat64
 	var updatedAt sql.NullString
 	var fullName string
-	if err := row.Scan(&lat, &lng, &acc, &v.Status, &updatedAt, &fullName); err != nil {
+	if err := row.Scan(&alertID, &lat, &lng, &acc, &v.Status, &updatedAt, &fullName); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -246,7 +322,15 @@ func (r *Repository) GetByShareToken(token string) (*PublicAlertView, error) {
 	}
 	if updatedAt.Valid {
 		v.UpdatedAt = parseTime(updatedAt.String)
+		v.ConnectivityLost = v.Status == "accepted" && time.Since(v.UpdatedAt) > connectivityLostAfter
 	}
 	v.FirstName = firstName(fullName)
+
+	var duressCount int
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM duress_signals WHERE sos_id = ?`, alertID).Scan(&duressCount); err != nil {
+		return nil, err
+	}
+	v.DuressActive = duressCount > 0
+
 	return &v, nil
 }

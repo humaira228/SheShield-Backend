@@ -23,6 +23,13 @@ type CreateAlertRequest struct {
 	// IDs of contacts the phone already texted successfully from its own SIM.
 	// The server skips these, so nobody receives the same alert twice.
 	NotifiedByDevice []string `json:"notifiedByDevice"`
+
+	// AVConsent is the requester's real-time answer to "start audio/video
+	// recording for this emergency?" -- never pre-checked client-side. Actual
+	// recording capture/storage isn't implemented yet (needs legal sign-off
+	// on two-party consent law first -- see the spec's §7); this only
+	// persists the consent choice itself.
+	AVConsent bool `json:"avConsent"`
 }
 
 type Delivery struct {
@@ -51,6 +58,8 @@ type Alert struct {
 	// response rather than sent as a broken link.
 	ShareToken string `json:"shareToken,omitempty"`
 	ShareURL   string `json:"shareUrl,omitempty"`
+
+	AVConsent bool `json:"avConsent"`
 }
 
 // UpdateLocationRequest is the PATCH /alerts/{id}/location body, sent
@@ -91,4 +100,15 @@ type PublicAlertView struct {
 	Status         string    `json:"status"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 	FirstName      string    `json:"firstName"`
+
+	// DuressActive: at least one duress signal (see internal/duress) has
+	// fired on this SOS. Shown to anyone already on it -- trusted contacts,
+	// the accepted helper -- per the spec's §3 disclosure table.
+	DuressActive bool `json:"duressActive"`
+
+	// ConnectivityLost: the requester hasn't sent a location update in over
+	// connectivityLostAfter while the SOS is still 'accepted' -- "went quiet
+	// during an emergency" is its own signal, distinct from a routine missed
+	// check-in (see the spec's §8). Computed live from UpdatedAt, not stored.
+	ConnectivityLost bool `json:"connectivityLost"`
 }

@@ -98,6 +98,23 @@ func (r *Repository) Delete(userUID, id string) error {
 	return nil
 }
 
+// AreConnected reports whether two accounts are linked via trusted_contacts
+// in either direction -- one has the other's account as a linked trusted
+// contact. This is the only real "social graph" this app has today, so it's
+// the basis for the spec's §10 mutual-connection signal (see
+// internal/helper.Service.NearbyAlerts): a simpler, direct-edge
+// interpretation of "connection" rather than a full friend-of-friend graph,
+// which this data model doesn't otherwise support.
+func (r *Repository) AreConnected(uidA, uidB string) (bool, error) {
+	var n int
+	err := r.db.QueryRow(`
+		SELECT COUNT(*) FROM trusted_contacts
+		WHERE (user_uid = ? AND linked_user_uid = ?) OR (user_uid = ? AND linked_user_uid = ?)`,
+		uidA, uidB, uidB, uidA,
+	).Scan(&n)
+	return n > 0, err
+}
+
 func (r *Repository) CountForUser(userUID string) (int, error) {
 	var n int
 	err := r.db.QueryRow(

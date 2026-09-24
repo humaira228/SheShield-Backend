@@ -25,6 +25,7 @@ func (h *Handler) Register(mux *http.ServeMux, jwtSecret string) {
 	mux.Handle("GET /api/v1/auth/me", requireAuth(http.HandlerFunc(h.me)))
 	mux.Handle("PATCH /api/v1/auth/me", requireAuth(http.HandlerFunc(h.updateMe)))
 	mux.Handle("PATCH /api/v1/auth/fcm-token", requireAuth(http.HandlerFunc(h.updateFCMToken)))
+	mux.Handle("PATCH /api/v1/auth/discoverable", requireAuth(http.HandlerFunc(h.setDiscoverable)))
 }
 
 func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +89,25 @@ func (h *Handler) updateMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, user)
+}
+
+// setDiscoverable is the §10 requester-side toggle: "discoverable via
+// mutual connections," default false, an explicit later choice outside the
+// pressure of an active emergency (see internal/auth.Service.SetDiscoverable).
+func (h *Handler) setDiscoverable(w http.ResponseWriter, r *http.Request) {
+	uid, _ := middleware.UIDFromContext(r.Context())
+	var req struct {
+		Discoverable bool `json:"discoverable"`
+	}
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Err(w, http.StatusBadRequest, "Invalid request body.")
+		return
+	}
+	if err := h.service.SetDiscoverable(uid, req.Discoverable); err != nil {
+		httpx.Err(w, http.StatusInternalServerError, "Could not update that setting.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]bool{"discoverable": req.Discoverable})
 }
 
 func (h *Handler) updateFCMToken(w http.ResponseWriter, r *http.Request) {

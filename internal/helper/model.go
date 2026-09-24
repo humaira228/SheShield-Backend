@@ -20,14 +20,22 @@ type Status struct {
 	Latitude  *float64  `json:"-"`
 	Longitude *float64  `json:"-"`
 	UpdatedAt time.Time `json:"-"`
+
+	// MutualConnectionOptIn is the helper-side half of the spec's §10
+	// double opt-in. The spec restricts it to "Tier 3 Professional/Top
+	// Helper" -- this app has no tier system yet (§4 is unbuilt), so this
+	// is gated to any is_helper_verified account instead, same as every
+	// other helper-only action here. Revisit once tiers exist.
+	MutualConnectionOptIn bool `json:"mutualConnectionOptIn"`
 }
 
 // SetStatusRequest is the PUT /helper/status body.
 type SetStatusRequest struct {
-	IsActive  bool     `json:"isActive"`
-	RadiusKm  float64  `json:"radiusKm"`
-	Latitude  *float64 `json:"latitude"`
-	Longitude *float64 `json:"longitude"`
+	IsActive              bool     `json:"isActive"`
+	RadiusKm              float64  `json:"radiusKm"`
+	Latitude              *float64 `json:"latitude"`
+	Longitude             *float64 `json:"longitude"`
+	MutualConnectionOptIn bool     `json:"mutualConnectionOptIn"`
 }
 
 // NearbyAlert is what an available helper sees before responding: a rough
@@ -39,18 +47,27 @@ type NearbyAlert struct {
 	RoughArea      string    `json:"roughArea"`
 	DistanceMeters float64   `json:"distanceMeters"`
 	CreatedAt      time.Time `json:"createdAt"`
+
+	// MutualConnection: true only when both the requester
+	// (discoverable_via_mutual_connections) and this helper
+	// (mutual_connection_opt_in) have opted in for matches in general, AND
+	// they're actually connected (see contact.Repository.AreConnected) --
+	// see the spec's §10. False, never omitted, when either opt-in is off,
+	// so the client never has to guess whether it was computed.
+	MutualConnection bool `json:"mutualConnection"`
 }
 
 // AcceptedAlert is the full detail, returned only to the one helper who wins
 // the accept race. Mirrors Flutter's AcceptedAlert exactly.
 type AcceptedAlert struct {
-	ID          string    `json:"id"`
-	UserName    string    `json:"userName"`
-	Phone       string    `json:"phone"`
-	CountryCode string    `json:"countryCode"`
-	Latitude    float64   `json:"latitude"`
-	Longitude   float64   `json:"longitude"`
-	AcceptedAt  time.Time `json:"acceptedAt"`
+	ID           string    `json:"id"`
+	UserName     string    `json:"userName"`
+	Phone        string    `json:"phone"`
+	CountryCode  string    `json:"countryCode"`
+	Latitude     float64   `json:"latitude"`
+	Longitude    float64   `json:"longitude"`
+	AcceptedAt   time.Time `json:"acceptedAt"`
+	RequesterUID string    `json:"requesterUid"`
 }
 
 // activeAlert is one row read back from the alerts table for the nearby

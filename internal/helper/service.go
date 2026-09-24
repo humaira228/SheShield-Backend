@@ -2,6 +2,7 @@ package helper
 
 import (
 	"errors"
+	"log"
 	"math"
 	"sort"
 	"time"
@@ -16,6 +17,7 @@ var (
 	ErrInvalidRadius   = errors.New("Radius must be between 0.5 and 50 km.")
 	ErrNotActive       = errors.New("Turn on helper mode to see nearby alerts.")
 	ErrAlreadyAccepted = errors.New("Someone else already responded to this alert.")
+	ErrNotYourMatch    = errors.New("You don't currently hold this SOS.")
 )
 
 // alertFreshness matches the 15-minute stale-location/stale-alert window
@@ -40,17 +42,57 @@ type StatusStore interface {
 type AlertsStore interface {
 	ActiveAlerts() ([]activeAlert, error)
 	Accept(alertID, helperUID string, now time.Time) (acceptedRow, bool, error)
+	Release(alertID, helperUID string, now time.Time) error
+	SafetyStatus(alertID, helperUID string) (duressActive, connectivityLost bool, err error)
+}
+
+// Matches is this package's hook into internal/matching's sos_matches table:
+// every nearby-alerts poll upserts a 'pending' row per helper (the app's
+// existing polling loop doubling as the "dispatch" step -- see the spec's
+// §2), and a successful Accept locks the winner's row and releases every
+// other pending one so those helpers see "Already matched."
+type Matches interface {
+	UpsertPending(sosID, helperID string) error
+	Lock(sosID, helperID string, now time.Time) error
+	ReleaseOthers(sosID, winningHelperID string, now time.Time) error
+	Release(sosID string, now time.Time) (string, error)
+}
+
+// DiscoverabilityStore and ConnectionStore back the §10 mutual-connection
+// signal -- two narrow interfaces (not one) because no single concrete type
+// implements both: discoverability lives on internal/auth.Repository,
+// connectedness on internal/contact.Repository. Either may be left nil
+// (e.g. in tests), in which case NearbyAlerts simply never sets
+// MutualConnection true.
+type DiscoverabilityStore interface {
+	IsDiscoverable(uid string) (bool, error)
+}
+
+type ConnectionStore interface {
+	AreConnected(uidA, uidB string) (bool, error)
 }
 
 type Service struct {
-	users  Users
-	status StatusStore
-	alerts AlertsStore
-	now    func() time.Time
+	users        Users
+	status       StatusStore
+	alerts       AlertsStore
+	matches      Matches
+	discoverable DiscoverabilityStore
+	connections  ConnectionStore
+	now          func() time.Time
 }
 
-func NewService(users Users, status StatusStore, alerts AlertsStore) *Service {
-	return &Service{users: users, status: status, alerts: alerts, now: func() time.Time { return time.Now().UTC() }}
+func NewService(users Users, status StatusStore, alerts AlertsStore, matches Matches) *Service {
+	return &Service{users: users, status: status, alerts: alerts, matches: matches, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// WithMutualConnections wires the optional §10 signal in -- separate from
+// NewService so every existing call site (and every test) keeps working
+// unchanged; only cmd/api/main.go's real wiring needs to opt in.
+func (s *Service) WithMutualConnections(discoverable DiscoverabilityStore, connections ConnectionStore) *Service {
+	s.discoverable = discoverable
+	s.connections = connections
+	return s
 }
 
 func isHelper(u auth.User) bool {
@@ -97,11 +139,12 @@ func (s *Service) SetStatus(uid string, req SetStatusRequest) (Status, error) {
 	}
 
 	st := Status{
-		IsActive:  req.IsActive,
-		RadiusKm:  req.RadiusKm,
-		Latitude:  req.Latitude,
-		Longitude: req.Longitude,
-		UpdatedAt: s.now(),
+		IsActive:              req.IsActive,
+		RadiusKm:              req.RadiusKm,
+		Latitude:              req.Latitude,
+		Longitude:             req.Longitude,
+		UpdatedAt:             s.now(),
+		MutualConnectionOptIn: req.MutualConnectionOptIn,
 	}
 	if err := s.status.SetStatus(uid, st); err != nil {
 		return Status{}, err
@@ -157,11 +200,22 @@ func (s *Service) NearbyAlerts(uid string) ([]NearbyAlert, error) {
 			continue
 		}
 		out = append(out, NearbyAlert{
-			ID:             a.ID,
-			RoughArea:      "Nearby",
-			DistanceMeters: dist,
-			CreatedAt:      a.CreatedAt,
+			ID:               a.ID,
+			RoughArea:        "Nearby",
+			DistanceMeters:   dist,
+			CreatedAt:        a.CreatedAt,
+			MutualConnection: s.mutualConnection(st.MutualConnectionOptIn, uid, a.UserUID),
 		})
+
+		// This poll is this app's existing "dispatch" step -- record that
+		// uid was shown this SOS (see internal/matching's package doc).
+		// Best-effort: a failed write here must never stop the helper from
+		// seeing their nearby list.
+		if s.matches != nil {
+			if err := s.matches.UpsertPending(a.ID, uid); err != nil {
+				log.Printf("helper: could not record pending match for %s/%s: %v", a.ID, uid, err)
+			}
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].DistanceMeters < out[j].DistanceMeters })
 	return out, nil
@@ -178,22 +232,93 @@ func (s *Service) Accept(uid, alertID string) (*AcceptedAlert, error) {
 		return nil, ErrNotHelper
 	}
 
-	row, won, err := s.alerts.Accept(alertID, uid, s.now())
+	now := s.now()
+	row, won, err := s.alerts.Accept(alertID, uid, now)
 	if err != nil {
 		return nil, err
 	}
 	if !won {
 		return nil, nil
 	}
+
+	if s.matches != nil {
+		if err := s.matches.Lock(alertID, uid, now); err != nil {
+			log.Printf("helper: could not lock match %s/%s: %v", alertID, uid, err)
+		}
+		if err := s.matches.ReleaseOthers(alertID, uid, now); err != nil {
+			log.Printf("helper: could not release other matches for %s: %v", alertID, err)
+		}
+	}
+
 	return &AcceptedAlert{
-		ID:          alertID,
-		UserName:    row.UserName,
-		Phone:       row.Phone,
-		CountryCode: row.CountryCode,
-		Latitude:    row.Latitude,
-		Longitude:   row.Longitude,
-		AcceptedAt:  s.now(),
+		ID:           alertID,
+		UserName:     row.UserName,
+		Phone:        row.Phone,
+		CountryCode:  row.CountryCode,
+		Latitude:     row.Latitude,
+		Longitude:    row.Longitude,
+		AcceptedAt:   now,
+		RequesterUID: row.UserUID,
 	}, nil
+}
+
+// Release lets the currently accepted helper back out -- "reviews the live
+// feed... can decline/back out if the situation seems unsafe or suspicious"
+// per the spec's §2. Reopens the alert (status back to 'active') so the next
+// poll naturally re-surfaces it to the standby helpers already sitting on
+// 'released' sos_matches rows, and flips this helper's own row back to
+// 'released' too.
+func (s *Service) Release(uid, alertID string) error {
+	user, err := s.users.FindByUID(uid)
+	if err != nil {
+		return err
+	}
+	if !isHelper(user) {
+		return ErrNotHelper
+	}
+
+	if err := s.alerts.Release(alertID, uid, s.now()); err != nil {
+		return err
+	}
+	if s.matches != nil {
+		if _, err := s.matches.Release(alertID, s.now()); err != nil {
+			log.Printf("helper: could not release match row for %s: %v", alertID, err)
+		}
+	}
+	return nil
+}
+
+// SafetyStatus lets the currently accepted helper poll for the live
+// duress/connectivity signals the spec's §8 describes -- the same signals
+// the public tracking page shows the trusted contacts, surfaced to the one
+// helper actually en route too.
+func (s *Service) SafetyStatus(uid, alertID string) (duressActive, connectivityLost bool, err error) {
+	user, err := s.users.FindByUID(uid)
+	if err != nil {
+		return false, false, err
+	}
+	if !isHelper(user) {
+		return false, false, ErrNotHelper
+	}
+	return s.alerts.SafetyStatus(alertID, uid)
+}
+
+// mutualConnection implements the spec's §10 double opt-in: both sides
+// must have opted in AND actually be connected (see
+// contact.Repository.AreConnected) before the signal is ever true. Errors
+// from either lookup are treated as "no signal" rather than failing the
+// whole nearby-alerts call -- this is a nice-to-have match hint, not
+// something that should ever block seeing a real SOS.
+func (s *Service) mutualConnection(helperOptedIn bool, helperUID, requesterUID string) bool {
+	if !helperOptedIn || s.discoverable == nil || s.connections == nil {
+		return false
+	}
+	discoverable, err := s.discoverable.IsDiscoverable(requesterUID)
+	if err != nil || !discoverable {
+		return false
+	}
+	connected, err := s.connections.AreConnected(helperUID, requesterUID)
+	return err == nil && connected
 }
 
 func isFresh(t, now time.Time) bool {
