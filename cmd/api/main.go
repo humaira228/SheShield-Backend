@@ -3,7 +3,9 @@ package main
 import (
 	"log"
 	"net/http"
+	"time"
 
+	"github.com/zannatulmaliha/sheshield-backend/internal/adminapi"
 	"github.com/zannatulmaliha/sheshield-backend/internal/alert"
 	"github.com/zannatulmaliha/sheshield-backend/internal/audit"
 	"github.com/zannatulmaliha/sheshield-backend/internal/auth"
@@ -90,13 +92,48 @@ func main() {
 	alertHandler.Register(mux, cfg.JWTSecret)
 	alertHandler.RegisterPublic(mux) // no-login tracking page + its JSON feed -- deliberately outside RequireAuth
 
-	verificationService := verification.NewService(authRepo, verification.NewRepository(conn), cfg.UploadDir)
+	verificationRepo := verification.NewRepository(conn)
+	verificationService := verification.NewService(authRepo, verificationRepo, cfg.UploadDir)
 	verification.NewHandler(verificationService).Register(mux, cfg.JWTSecret)
 
 	helperRepo := helper.NewRepository(conn)
 	helperService := helper.NewService(authRepo, helperRepo, helperRepo, matchesRepo).
 		WithMutualConnections(authRepo, contactRepo) // §10: authRepo.IsDiscoverable + contactRepo.AreConnected
 	helper.NewHandler(helperService).Register(mux, cfg.JWTSecret)
+
+	// Admin moderation dashboard (internal/adminapi) -- opt-in only. With
+	// no ADMIN_API_KEY set, none of these routes are registered at all, so
+	// an unconfigured deployment is identical to before this existed:
+	// moderation stays CLI-only (cmd/admin), reachable only by someone with
+	// file access to the server. See internal/middleware.RequireAdminKey.
+	if cfg.AdminAPIKey == "" {
+		log.Println("Admin dashboard: ADMIN_API_KEY not set -- /api/v1/admin/* routes are disabled. Moderation is CLI-only (cmd/admin) until you set one.")
+	} else {
+		// suspendFn mirrors cmd/admin/reports.go's suspendHelper exactly,
+		// over the same three repositories main() already constructed --
+		// no new instantiation, no behavior drift between the CLI and the
+		// dashboard's fast-track suspension.
+		suspendFn := adminapi.SuspendFunc(func(uid, reason, actorID string) (string, error) {
+			lockedSOS, err := matchesRepo.LockedSOSForHelper(uid)
+			if err != nil {
+				return "", err
+			}
+			if lockedSOS != "" {
+				if err := helperRepo.Release(lockedSOS, uid, time.Now().UTC()); err != nil {
+					return "", err
+				}
+				if _, err := matchesRepo.Release(lockedSOS, time.Now().UTC()); err != nil {
+					return "", err
+				}
+			}
+			if err := authRepo.SetHelperVerified(uid, false); err != nil {
+				return "", err
+			}
+			_ = auditLog.Log(actorID, audit.ActionHelperSuspended, uid)
+			return lockedSOS, nil
+		})
+		adminapi.NewHandler(reportService, auditLog, suspendFn, verificationRepo, cfg.UploadDir).Register(mux, cfg.AdminAPIKey)
+	}
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
