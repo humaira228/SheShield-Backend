@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/zannatulmaliha/sheshield-backend/internal/duress"
 	"github.com/zannatulmaliha/sheshield-backend/internal/httpx"
 	"github.com/zannatulmaliha/sheshield-backend/internal/middleware"
 )
@@ -23,6 +24,7 @@ func (h *Handler) Register(mux *http.ServeMux, jwtSecret string) {
 	mux.Handle("GET /api/v1/alerts", auth(http.HandlerFunc(h.listMine)))
 	mux.Handle("PATCH /api/v1/alerts/{id}/location", auth(http.HandlerFunc(h.updateLocation)))
 	mux.Handle("PATCH /api/v1/alerts/{id}/resolve", auth(http.HandlerFunc(h.resolve)))
+	mux.Handle("POST /api/v1/alerts/{id}/duress", auth(http.HandlerFunc(h.triggerDuress)))
 }
 
 // RegisterPublic wires the routes a trusted contact opens with no login: the
@@ -118,6 +120,41 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// triggerDuress fires one of the spec's §2a duress mechanisms -- the client
+// decides which type applies (a hardware button pattern, a missed check-in
+// timeout, or the explicit secondary panic tap) and just posts it here.
+// safeword_voice is accepted by the type enum but has no real detection
+// behind it yet (see internal/duress's package doc).
+func (h *Handler) triggerDuress(w http.ResponseWriter, r *http.Request) {
+	uid, _ := middleware.UIDFromContext(r.Context())
+	id := r.PathValue("id")
+
+	var req struct {
+		Type string `json:"type"`
+	}
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Err(w, http.StatusBadRequest, "Invalid request body.")
+		return
+	}
+
+	signal, err := h.svc.TriggerDuress(uid, id, duress.Type(req.Type))
+	switch {
+	case errors.Is(err, ErrInvalidDuress):
+		httpx.Err(w, http.StatusBadRequest, err.Error())
+		return
+	case errors.Is(err, duress.ErrNotOwnAlert):
+		httpx.Err(w, http.StatusForbidden, err.Error())
+		return
+	case errors.Is(err, ErrNotFound):
+		httpx.Err(w, http.StatusNotFound, "Alert not found.")
+		return
+	case err != nil:
+		httpx.Err(w, http.StatusInternalServerError, "Could not record the duress signal.")
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, signal)
 }
 
 // publicView is the JSON feed the tracking page polls every few seconds.

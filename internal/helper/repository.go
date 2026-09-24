@@ -31,13 +31,13 @@ func parseTime(s string) time.Time {
 // not an error here, it's just "never configured".
 func (r *Repository) GetStatus(uid string) (Status, error) {
 	row := r.db.QueryRow(`
-		SELECT is_active, radius_km, latitude, longitude, updated_at
+		SELECT is_active, radius_km, latitude, longitude, updated_at, mutual_connection_opt_in
 		FROM helper_status WHERE user_uid = ?`, uid)
 
 	var s Status
 	var lat, lng sql.NullFloat64
 	var updatedAt string
-	err := row.Scan(&s.IsActive, &s.RadiusKm, &lat, &lng, &updatedAt)
+	err := row.Scan(&s.IsActive, &s.RadiusKm, &lat, &lng, &updatedAt, &s.MutualConnectionOptIn)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Status{IsActive: false, RadiusKm: DefaultRadiusKm}, nil
 	}
@@ -59,16 +59,17 @@ func (r *Repository) GetStatus(uid string) (Status, error) {
 // SetStatus upserts the helper's status row.
 func (r *Repository) SetStatus(uid string, s Status) error {
 	_, err := r.db.Exec(`
-		INSERT INTO helper_status (user_uid, is_active, radius_km, latitude, longitude, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO helper_status (user_uid, is_active, radius_km, latitude, longitude, updated_at, mutual_connection_opt_in)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_uid) DO UPDATE SET
 			is_active = excluded.is_active,
 			radius_km = excluded.radius_km,
 			latitude = excluded.latitude,
 			longitude = excluded.longitude,
-			updated_at = excluded.updated_at`,
+			updated_at = excluded.updated_at,
+			mutual_connection_opt_in = excluded.mutual_connection_opt_in`,
 		uid, s.IsActive, s.RadiusKm, nullableFloat(s.Latitude), nullableFloat(s.Longitude),
-		s.UpdatedAt.UTC().Format(time.RFC3339),
+		s.UpdatedAt.UTC().Format(time.RFC3339), s.MutualConnectionOptIn,
 	)
 	return err
 }
@@ -111,6 +112,7 @@ type acceptedRow struct {
 	UserName    string
 	Phone       string
 	CountryCode string
+	UserUID     string
 }
 
 // Accept is the one atomic operation in this package: exactly one concurrent
@@ -146,10 +148,10 @@ func (r *Repository) Accept(alertID, helperUID string, now time.Time) (acceptedR
 
 	var row acceptedRow
 	err = tx.QueryRow(`
-		SELECT a.latitude, a.longitude, u.name, u.phone, u.country_code
+		SELECT a.latitude, a.longitude, u.name, u.phone, u.country_code, u.uid
 		FROM alerts a JOIN users u ON u.uid = a.user_uid
 		WHERE a.id = ?`, alertID,
-	).Scan(&row.Latitude, &row.Longitude, &row.UserName, &row.Phone, &row.CountryCode)
+	).Scan(&row.Latitude, &row.Longitude, &row.UserName, &row.Phone, &row.CountryCode, &row.UserUID)
 	if err != nil {
 		return acceptedRow{}, false, err
 	}
@@ -158,4 +160,61 @@ func (r *Repository) Accept(alertID, helperUID string, now time.Time) (acceptedR
 		return acceptedRow{}, false, err
 	}
 	return row, true, nil
+}
+
+// Release reopens an alert this helper currently holds: back to 'active',
+// accepted_by_uid/accepted_at cleared, so the next nearby-alerts poll (by
+// this helper or any other) naturally re-surfaces it. Only the helper who
+// actually holds it can release it -- the WHERE clause enforces that the
+// same way Accept's compare-and-swap enforces the win.
+func (r *Repository) Release(alertID, helperUID string, now time.Time) error {
+	res, err := r.db.Exec(`
+		UPDATE alerts
+		SET status = 'active', accepted_by_uid = NULL, accepted_at = NULL, updated_at = ?
+		WHERE id = ? AND accepted_by_uid = ? AND status = 'accepted'`,
+		now.UTC().Format(time.RFC3339), alertID, helperUID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// ErrNotYourMatch is declared in service.go (same package) -- the
+		// caller doesn't currently hold this alert's lock, either it was
+		// never theirs, someone else already released/reclaimed it, or the
+		// id doesn't exist.
+		return ErrNotYourMatch
+	}
+	return nil
+}
+
+// safetyConnectivityLostAfter mirrors internal/alert's
+// connectivityLostAfter -- kept as its own constant rather than an
+// import to avoid a helper -> alert package dependency for one value.
+const safetyConnectivityLostAfter = 60 * time.Second
+
+// SafetyStatus reads the live duress/connectivity signals for an alert this
+// helper currently holds -- see the spec's §8. Ownership-checked the same
+// way Release is: only the helper who currently holds the alert can poll it.
+func (r *Repository) SafetyStatus(alertID, helperUID string) (duressActive, connectivityLost bool, err error) {
+	var status, updatedAt string
+	err = r.db.QueryRow(`
+		SELECT status, updated_at FROM alerts
+		WHERE id = ? AND accepted_by_uid = ?`, alertID, helperUID,
+	).Scan(&status, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, ErrNotYourMatch
+	}
+	if err != nil {
+		return false, false, err
+	}
+
+	if t := parseTime(updatedAt); status == "accepted" {
+		connectivityLost = time.Since(t) > safetyConnectivityLostAfter
+	}
+
+	var duressCount int
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM duress_signals WHERE sos_id = ?`, alertID).Scan(&duressCount); err != nil {
+		return false, false, err
+	}
+	return duressCount > 0, connectivityLost, nil
 }

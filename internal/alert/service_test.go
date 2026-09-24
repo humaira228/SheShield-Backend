@@ -6,9 +6,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zannatulmaliha/sheshield-backend/internal/auth"
 	"github.com/zannatulmaliha/sheshield-backend/internal/contact"
+	"github.com/zannatulmaliha/sheshield-backend/internal/duress"
 )
 
 type fakeUsers struct{}
@@ -30,12 +32,19 @@ type fakeStore struct {
 
 	updateLocationErr error
 	resolveErr        error
+	wasQuickCancel    bool
 
 	publicView    *PublicAlertView
 	publicViewErr error
 
 	list    []AlertSummary
 	listErr error
+
+	requesterUID    string
+	requesterUIDErr error
+
+	locLat, locLng *float64
+	locErr         error
 }
 
 func (f *fakeStore) Save(a Alert) error {
@@ -60,8 +69,8 @@ func (f *fakeStore) UpdateLocation(alertID, ownerUID string, lat, lng, accuracy 
 	return f.updateLocationErr
 }
 
-func (f *fakeStore) Resolve(alertID, ownerUID string) error {
-	return f.resolveErr
+func (f *fakeStore) Resolve(alertID, ownerUID string) (bool, error) {
+	return f.wasQuickCancel, f.resolveErr
 }
 
 func (f *fakeStore) GetByShareToken(token string) (*PublicAlertView, error) {
@@ -76,6 +85,14 @@ func (f *fakeStore) ListByUser(uid string) ([]AlertSummary, error) {
 		return nil, f.listErr
 	}
 	return f.list, nil
+}
+
+func (f *fakeStore) RequesterFor(sosID string) (string, error) {
+	return f.requesterUID, f.requesterUIDErr
+}
+
+func (f *fakeStore) CurrentLocation(sosID string) (*float64, *float64, error) {
+	return f.locLat, f.locLng, f.locErr
 }
 
 type fakeSender struct {
@@ -129,14 +146,14 @@ func byID(a Alert) map[string]Delivery {
 }
 
 func TestTrigger_NoContacts(t *testing.T) {
-	svc := NewService(fakeUsers{}, fakeContacts{}, &fakeStore{}, &fakeSender{live: true}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, fakeContacts{}, &fakeStore{}, &fakeSender{live: true}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 	if _, err := svc.Trigger(context.Background(), "u1", CreateAlertRequest{}); !errors.Is(err, ErrNoContacts) {
 		t.Fatalf("got %v, want ErrNoContacts", err)
 	}
 }
 
 func TestTrigger_BadLocation(t *testing.T) {
-	svc := NewService(fakeUsers{}, contacts3(), &fakeStore{}, &fakeSender{live: true}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), &fakeStore{}, &fakeSender{live: true}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 	bad := []CreateAlertRequest{
 		{Latitude: f64(23.8)},                       // lat without lng
 		{Latitude: f64(91), Longitude: f64(90)},     // lat out of range
@@ -152,7 +169,7 @@ func TestTrigger_BadLocation(t *testing.T) {
 func TestTrigger_SkipsContactsAlreadyTextedByPhone(t *testing.T) {
 	sender := &fakeSender{live: true}
 	store := &fakeStore{}
-	svc := NewService(fakeUsers{}, contacts3(), store, sender, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), store, sender, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 
 	a, err := svc.Trigger(context.Background(), "u1", CreateAlertRequest{
 		Latitude: f64(23.81), Longitude: f64(90.41),
@@ -189,7 +206,7 @@ func TestTrigger_SkipsContactsAlreadyTextedByPhone(t *testing.T) {
 
 func TestTrigger_OneFailureDoesNotStopTheOthers(t *testing.T) {
 	sender := &fakeSender{live: true, failFor: map[string]bool{"+8801722222222": true}}
-	svc := NewService(fakeUsers{}, contacts3(), &fakeStore{}, sender, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), &fakeStore{}, sender, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 
 	a, err := svc.Trigger(context.Background(), "u1", CreateAlertRequest{})
 	if err != nil {
@@ -208,7 +225,7 @@ func TestTrigger_OneFailureDoesNotStopTheOthers(t *testing.T) {
 }
 
 func TestTrigger_LogOnlySenderReportsSimulatedNeverSent(t *testing.T) {
-	svc := NewService(fakeUsers{}, contacts3(), &fakeStore{}, &fakeSender{live: false}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), &fakeStore{}, &fakeSender{live: false}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 	a, err := svc.Trigger(context.Background(), "u1", CreateAlertRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -221,7 +238,7 @@ func TestTrigger_LogOnlySenderReportsSimulatedNeverSent(t *testing.T) {
 }
 
 func TestTrigger_SaveFailureStillReportsWhatWasSent(t *testing.T) {
-	svc := NewService(fakeUsers{}, contacts3(), &fakeStore{err: errors.New("disk full")}, &fakeSender{live: true}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), &fakeStore{err: errors.New("disk full")}, &fakeSender{live: true}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 	a, err := svc.Trigger(context.Background(), "u1", CreateAlertRequest{})
 	if err != nil {
 		t.Fatalf("a DB error must not hide that texts went out, got %v", err)
@@ -263,7 +280,7 @@ func TestFirstName(t *testing.T) {
 func TestTrigger_MessageIncludesTrackingLink(t *testing.T) {
 	sender := &fakeSender{live: true}
 	store := &fakeStore{shareToken: "abc123"}
-	svc := NewService(fakeUsers{}, contacts3(), store, sender, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), store, sender, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 
 	a, err := svc.Trigger(context.Background(), "u1", CreateAlertRequest{})
 	if err != nil {
@@ -280,7 +297,7 @@ func TestTrigger_MessageIncludesTrackingLink(t *testing.T) {
 func TestTrigger_ShareTokenFailureStillSendsSOS(t *testing.T) {
 	sender := &fakeSender{live: true}
 	store := &fakeStore{shareTokenErr: errors.New("db down")}
-	svc := NewService(fakeUsers{}, contacts3(), store, sender, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), store, sender, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 
 	a, err := svc.Trigger(context.Background(), "u1", CreateAlertRequest{})
 	if err != nil {
@@ -298,7 +315,7 @@ func TestTrigger_ShareTokenFailureStillSendsSOS(t *testing.T) {
 }
 
 func TestUpdateLocation_RejectsBadLocation(t *testing.T) {
-	svc := NewService(fakeUsers{}, contacts3(), &fakeStore{}, &fakeSender{}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), &fakeStore{}, &fakeSender{}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 	if err := svc.UpdateLocation("a1", "u1", nil, f64(90), f64(5)); !errors.Is(err, ErrBadLocation) {
 		t.Fatalf("want ErrBadLocation for missing latitude, got %v", err)
 	}
@@ -309,7 +326,7 @@ func TestUpdateLocation_RejectsBadLocation(t *testing.T) {
 
 func TestUpdateLocation_PassesThroughStoreErrors(t *testing.T) {
 	store := &fakeStore{updateLocationErr: ErrAlertNotActive}
-	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 	if err := svc.UpdateLocation("a1", "u1", f64(23.8), f64(90.4), nil); !errors.Is(err, ErrAlertNotActive) {
 		t.Fatalf("want ErrAlertNotActive, got %v", err)
 	}
@@ -317,7 +334,7 @@ func TestUpdateLocation_PassesThroughStoreErrors(t *testing.T) {
 
 func TestResolve_PassesThroughStoreErrors(t *testing.T) {
 	store := &fakeStore{resolveErr: ErrNotFound}
-	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 	if err := svc.Resolve("a1", "u1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
@@ -326,7 +343,7 @@ func TestResolve_PassesThroughStoreErrors(t *testing.T) {
 func TestPublicView_ReturnsStoreResult(t *testing.T) {
 	want := &PublicAlertView{FirstName: "Zannat", Status: "active"}
 	store := &fakeStore{publicView: want}
-	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 
 	got, err := svc.PublicView("tok123")
 	if err != nil {
@@ -339,7 +356,7 @@ func TestPublicView_ReturnsStoreResult(t *testing.T) {
 
 func TestPublicView_NotFound(t *testing.T) {
 	store := &fakeStore{publicViewErr: ErrNotFound}
-	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 	if _, err := svc.PublicView("garbage"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
@@ -348,7 +365,7 @@ func TestPublicView_NotFound(t *testing.T) {
 func TestListMine_ReturnsStoreResult(t *testing.T) {
 	want := []AlertSummary{{ID: "a1", Status: "resolved"}}
 	store := &fakeStore{list: want}
-	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 
 	got, err := svc.ListMine("victim1")
 	if err != nil {
@@ -361,8 +378,127 @@ func TestListMine_ReturnsStoreResult(t *testing.T) {
 
 func TestListMine_PassesThroughStoreErrors(t *testing.T) {
 	store := &fakeStore{listErr: errors.New("db down")}
-	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, "http://localhost:8080")
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, nil, nil, nil, "http://localhost:8080")
 	if _, err := svc.ListMine("victim1"); err == nil {
 		t.Fatal("want an error when the store fails")
 	}
+}
+
+type fakeDuressStore struct {
+	inserted  []duress.Type
+	insertErr error
+}
+
+func (f *fakeDuressStore) Insert(sosID string, t duress.Type, now time.Time) (duress.Signal, error) {
+	if f.insertErr != nil {
+		return duress.Signal{}, f.insertErr
+	}
+	f.inserted = append(f.inserted, t)
+	return duress.Signal{ID: "sig1", SOSID: sosID, Type: t, TriggeredAt: now}, nil
+}
+
+func TestTriggerDuress_RejectsInvalidType(t *testing.T) {
+	store := &fakeStore{requesterUID: "victim1"}
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, &fakeDuressStore{}, nil, nil, "http://localhost:8080")
+
+	if _, err := svc.TriggerDuress("victim1", "sos1", duress.Type("not_real")); !errors.Is(err, ErrInvalidDuress) {
+		t.Fatalf("want ErrInvalidDuress, got %v", err)
+	}
+}
+
+func TestTriggerDuress_RejectsNonOwner(t *testing.T) {
+	store := &fakeStore{requesterUID: "victim1"}
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, &fakeDuressStore{}, nil, nil, "http://localhost:8080")
+
+	// "attacker" is not the requester on this SOS -- they must not be able
+	// to trigger a duress escalation on someone else's alert.
+	if _, err := svc.TriggerDuress("attacker", "sos1", duress.TypeManualPanic); !errors.Is(err, duress.ErrNotOwnAlert) {
+		t.Fatalf("want ErrNotOwnAlert, got %v", err)
+	}
+}
+
+func TestTriggerDuress_InsertsAndNotifiesEveryTrustedContact(t *testing.T) {
+	store := &fakeStore{requesterUID: "victim1"}
+	duressStore := &fakeDuressStore{}
+	sender := &fakeSender{live: true}
+	svc := NewService(fakeUsers{}, contacts3(), store, sender, &fakePusher{}, duressStore, nil, nil, "http://localhost:8080")
+
+	signal, err := svc.TriggerDuress("victim1", "sos1", duress.TypeManualPanic)
+	if err != nil {
+		t.Fatalf("trigger duress: %v", err)
+	}
+	if signal.Type != duress.TypeManualPanic {
+		t.Errorf("want the manual_panic type recorded, got %v", signal.Type)
+	}
+	if len(duressStore.inserted) != 1 {
+		t.Fatalf("want exactly one signal inserted, got %d", len(duressStore.inserted))
+	}
+	// contacts3() seeds 3 trusted contacts -- every one of them must be
+	// texted, not just a subset, and this must not wait on any helper.
+	if len(sender.sentTo) != 3 {
+		t.Fatalf("want all 3 trusted contacts notified, got %d: %v", len(sender.sentTo), sender.sentTo)
+	}
+}
+
+func TestResolve_QuickCancelBelowThresholdDoesNotFile(t *testing.T) {
+	store := &fakeStore{wasQuickCancel: true}
+	rl := &fakeRateLimiterForAlert{needsReview: false}
+	flagged := false
+	flag := FlaggerFunc(func(reportedID, category, sosID string) error { flagged = true; return nil })
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, nil, rl, flag, "http://localhost:8080")
+
+	if err := svc.Resolve("sos1", "victim1"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !rl.markedCancelled {
+		t.Error("want the quick cancel recorded")
+	}
+	if flagged {
+		t.Error("below threshold -- want no system flag filed")
+	}
+}
+
+func TestResolve_QuickCancelAtThresholdFilesASystemFlag(t *testing.T) {
+	store := &fakeStore{wasQuickCancel: true}
+	rl := &fakeRateLimiterForAlert{needsReview: true}
+	var flaggedUID, flaggedSOS string
+	flag := FlaggerFunc(func(reportedID, category, sosID string) error {
+		flaggedUID, flaggedSOS = reportedID, sosID
+		return nil
+	})
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, nil, rl, flag, "http://localhost:8080")
+
+	if err := svc.Resolve("sos1", "victim1"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if flaggedUID != "victim1" || flaggedSOS != "sos1" {
+		t.Fatalf("want a system flag filed for victim1/sos1, got %q/%q", flaggedUID, flaggedSOS)
+	}
+}
+
+func TestResolve_NotAQuickCancelNeverTouchesRateLimiting(t *testing.T) {
+	store := &fakeStore{wasQuickCancel: false}
+	rl := &fakeRateLimiterForAlert{}
+	svc := NewService(fakeUsers{}, contacts3(), store, &fakeSender{}, &fakePusher{}, nil, rl, nil, "http://localhost:8080")
+
+	if err := svc.Resolve("sos1", "victim1"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if rl.markedCancelled {
+		t.Error("a normal (non-quick) resolve must never bump the cancelled counter")
+	}
+}
+
+type fakeRateLimiterForAlert struct {
+	markedCancelled bool
+	needsReview     bool
+}
+
+func (f *fakeRateLimiterForAlert) MarkCancelled(userID string, now time.Time) error {
+	f.markedCancelled = true
+	return nil
+}
+
+func (f *fakeRateLimiterForAlert) NeedsReview(userID string, now time.Time) (bool, error) {
+	return f.needsReview, nil
 }

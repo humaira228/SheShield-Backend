@@ -29,6 +29,8 @@ func (h *Handler) Register(mux *http.ServeMux, jwtSecret string) {
 	mux.Handle("PUT /api/v1/helper/status", auth(http.HandlerFunc(h.setStatus)))
 	mux.Handle("GET /api/v1/helper/alerts/nearby", auth(http.HandlerFunc(h.nearby)))
 	mux.Handle("POST /api/v1/helper/alerts/{id}/accept", auth(http.HandlerFunc(h.accept)))
+	mux.Handle("POST /api/v1/helper/alerts/{id}/release", auth(http.HandlerFunc(h.release)))
+	mux.Handle("GET /api/v1/helper/alerts/{id}/safety-status", auth(http.HandlerFunc(h.safetyStatus)))
 }
 
 func writeSvcError(w http.ResponseWriter, err error) {
@@ -40,6 +42,8 @@ func writeSvcError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrLocationNeeded), errors.Is(err, ErrInvalidRadius):
 		httpx.Err(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotActive):
+		httpx.Err(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrNotYourMatch):
 		httpx.Err(w, http.StatusConflict, err.Error())
 	default:
 		httpx.Err(w, http.StatusInternalServerError, "Something went wrong. Please try again.")
@@ -97,4 +101,35 @@ func (h *Handler) accept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, accepted)
+}
+
+// release lets the accepted helper back out of an SOS they're currently
+// holding -- "can decline/back out if the situation seems unsafe or
+// suspicious" per the spec's §2. Reopens the alert for the standby helpers.
+func (h *Handler) release(w http.ResponseWriter, r *http.Request) {
+	uid, _ := h.uid(r)
+	alertID := r.PathValue("id")
+
+	if err := h.svc.Release(uid, alertID); err != nil {
+		writeSvcError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// safetyStatus lets the accepted helper poll the live duress/connectivity
+// signals for the alert they're responding to -- see the spec's §8.
+func (h *Handler) safetyStatus(w http.ResponseWriter, r *http.Request) {
+	uid, _ := h.uid(r)
+	alertID := r.PathValue("id")
+
+	duressActive, connectivityLost, err := h.svc.SafetyStatus(uid, alertID)
+	if err != nil {
+		writeSvcError(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]bool{
+		"duressActive":     duressActive,
+		"connectivityLost": connectivityLost,
+	})
 }

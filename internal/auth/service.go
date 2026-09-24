@@ -71,7 +71,7 @@ func (s *Service) SignUp(req SignUpRequest) (AuthResponse, error) {
 		Gender:      req.Gender,
 		UserType:    req.UserType,
 	}
-	created, err := s.repo.Create(user, string(hash))
+	created, err := s.repo.Create(user, string(hash), req.DeviceFingerprint)
 	if err != nil {
 		if errors.Is(err, ErrDuplicateEmail) {
 			return AuthResponse{}, errors.New("An account with this email already exists.")
@@ -130,4 +130,13 @@ func (s *Service) UpdateProfile(uid string, req UpdateProfileRequest) (User, err
 // UpdateFCMToken records the caller's current push token.
 func (s *Service) UpdateFCMToken(uid, token string) error {
 	return s.repo.UpdateFCMToken(uid, token)
+}
+
+// SetDiscoverable is the requester-side toggle for §10's double opt-in
+// mutual-connection matching. Deliberately no gate here beyond "must be
+// signed in" -- unlike the helper-side toggle (helper.Service.SetStatus,
+// which requires verification), any account may choose whether it's
+// discoverable this way.
+func (s *Service) SetDiscoverable(uid string, discoverable bool) error {
+	return s.repo.SetDiscoverable(uid, discoverable)
 }

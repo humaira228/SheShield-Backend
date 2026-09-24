@@ -120,7 +120,7 @@ func TestResolve_IdempotentSafe(t *testing.T) {
 
 	repo := NewRepository(conn)
 
-	if err := repo.Resolve("alert1", "victim1"); err != nil {
+	if _, err := repo.Resolve("alert1", "victim1"); err != nil {
 		t.Fatalf("first Resolve: unexpected error: %v", err)
 	}
 
@@ -138,7 +138,7 @@ func TestResolve_IdempotentSafe(t *testing.T) {
 
 	// Calling it again must not panic or corrupt the row -- it should simply
 	// report the alert is no longer active, and leave resolved_at untouched.
-	err := repo.Resolve("alert1", "victim1")
+	_, err := repo.Resolve("alert1", "victim1")
 	if !errors.Is(err, ErrAlertNotActive) {
 		t.Fatalf("second Resolve: want ErrAlertNotActive, got %v", err)
 	}

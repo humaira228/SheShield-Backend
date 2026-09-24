@@ -27,7 +27,7 @@ const usage = `Usage:
   admin show <id>               applicant details and where their photos are
   admin approve <id>            verify this helper
   admin reject <id> "reason"    reject; the applicant sees the reason and may resubmit
-`
+` + reportsUsage
 
 func main() {
 	if len(os.Args) < 2 {
@@ -43,6 +43,7 @@ func main() {
 	}
 	defer conn.Close()
 	repo := verification.NewRepository(conn)
+	reportSvc := reportServiceFor(conn)
 
 	switch os.Args[1] {
 	case "pending":
@@ -58,6 +59,24 @@ func main() {
 				return errors.New(`a reason is required, e.g. reject <id> "ID photo is blurry"`)
 			}
 			return decide(repo, id, false, reason)
+		})
+	case "reports":
+		err = dispatchReports(conn, reportSvc, os.Args[2:])
+	case "suspend-helper":
+		err = withID(os.Args, 4, func(uid string) error {
+			reason := strings.TrimSpace(os.Args[3])
+			if reason == "" {
+				return errors.New(`a reason is required, e.g. suspend-helper <uid> "endangered requester during active SOS"`)
+			}
+			return suspendHelper(conn, uid, reason)
+		})
+	case "fingerprint":
+		err = withID(os.Args, 4, func(uid string) error {
+			reason := strings.TrimSpace(os.Args[3])
+			if reason == "" {
+				return errors.New(`a reason is required, e.g. fingerprint <uid> "checking for ban evasion"`)
+			}
+			return fingerprint(conn, uid, reason)
 		})
 	default:
 		fmt.Print(usage)

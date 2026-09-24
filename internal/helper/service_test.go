@@ -36,6 +36,11 @@ type fakeAlertsStore struct {
 	acceptWon  bool
 	acceptErr  error
 	acceptedID string // records what was passed in, for assertions
+	releaseErr error
+
+	safetyDuress   bool
+	safetyConnLost bool
+	safetyErr      error
 }
 
 func (f *fakeAlertsStore) ActiveAlerts() ([]activeAlert, error) { return f.alerts, nil }
@@ -43,6 +48,16 @@ func (f *fakeAlertsStore) ActiveAlerts() ([]activeAlert, error) { return f.alert
 func (f *fakeAlertsStore) Accept(alertID, helperUID string, now time.Time) (acceptedRow, bool, error) {
 	f.acceptedID = alertID
 	return f.acceptRow, f.acceptWon, f.acceptErr
+}
+
+func (f *fakeAlertsStore) Release(alertID, helperUID string, now time.Time) error {
+	f.acceptedID = alertID
+	return f.releaseErr
+}
+
+func (f *fakeAlertsStore) SafetyStatus(alertID, helperUID string) (bool, bool, error) {
+	f.acceptedID = alertID
+	return f.safetyDuress, f.safetyConnLost, f.safetyErr
 }
 
 func verifiedHelper() auth.User {
@@ -54,7 +69,7 @@ func plainUser() auth.User {
 }
 
 func newTestService(user auth.User, status *fakeStatusStore, alerts *fakeAlertsStore, now time.Time) *Service {
-	svc := NewService(fakeUsers{user}, status, alerts)
+	svc := NewService(fakeUsers{user}, status, alerts, nil)
 	svc.now = func() time.Time { return now }
 	return svc
 }
@@ -138,6 +153,71 @@ func TestNearbyAlerts_FiltersByRadiusAndFreshnessAndSortsByDistance(t *testing.T
 	}
 	if len(got) != 1 || got[0].ID != "near" {
 		t.Fatalf("want exactly [near], got %+v", got)
+	}
+}
+
+type fakeDiscoverability struct{ discoverable map[string]bool }
+
+func (f fakeDiscoverability) IsDiscoverable(uid string) (bool, error) {
+	return f.discoverable[uid], nil
+}
+
+type fakeConnections struct{ connected bool }
+
+func (f fakeConnections) AreConnected(uidA, uidB string) (bool, error) { return f.connected, nil }
+
+// TestNearbyAlerts_MutualConnectionRequiresBothSidesOptedIn is the §10
+// double-opt-in property: the signal must be false unless the helper opted
+// in (via Status.MutualConnectionOptIn), the requester opted in (via
+// DiscoverabilityStore), AND they're actually connected -- any one being
+// false/off must keep the whole thing false.
+func TestNearbyAlerts_MutualConnectionRequiresBothSidesOptedIn(t *testing.T) {
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	lat, lng := 23.8103, 90.4125
+
+	newAlerts := func() *fakeAlertsStore {
+		return &fakeAlertsStore{alerts: []activeAlert{
+			{ID: "sos1", UserUID: "victim1", Latitude: &lat, Longitude: &lng, CreatedAt: now},
+		}}
+	}
+	newStatus := func(optIn bool) *fakeStatusStore {
+		s := newFakeStatusStore()
+		s.byUID["h1"] = Status{IsActive: true, RadiusKm: 5, Latitude: &lat, Longitude: &lng, UpdatedAt: now, MutualConnectionOptIn: optIn}
+		return s
+	}
+
+	cases := []struct {
+		name         string
+		helperOptIn  bool
+		discoverable bool
+		connected    bool
+		want         bool
+	}{
+		{"neither opted in", false, false, true, false},
+		{"only helper opted in", true, false, true, false},
+		{"only requester opted in", false, true, true, false},
+		{"both opted in but not connected", true, true, false, false},
+		{"both opted in and connected", true, true, true, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newTestService(verifiedHelper(), newStatus(tc.helperOptIn), newAlerts(), now)
+			svc.WithMutualConnections(
+				fakeDiscoverability{discoverable: map[string]bool{"victim1": tc.discoverable}},
+				fakeConnections{connected: tc.connected},
+			)
+			got, err := svc.NearbyAlerts("h1")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("want 1 alert, got %d", len(got))
+			}
+			if got[0].MutualConnection != tc.want {
+				t.Errorf("want MutualConnection=%v, got %v", tc.want, got[0].MutualConnection)
+			}
+		})
 	}
 }
 

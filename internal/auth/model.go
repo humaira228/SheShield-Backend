@@ -17,6 +17,11 @@ type User struct {
 	IsHelperVerified bool      `json:"isHelperVerified"`
 	FCMToken         *string   `json:"fcmToken,omitempty"`
 	CreatedAt        time.Time `json:"createdAt"`
+
+	// DiscoverableViaMutualConnections is the requester-side half of the
+	// §10 double opt-in -- see Service.SetDiscoverable. Read-only here;
+	// only PATCH /api/v1/auth/discoverable can change it.
+	DiscoverableViaMutualConnections bool `json:"discoverableViaMutualConnections"`
 }
 
 type SignUpRequest struct {
@@ -29,6 +34,15 @@ type SignUpRequest struct {
 	// "user" | "helper" | "user_helper" — validated against Gender in
 	// Service.SignUp: only "female" may pick "user" or "user_helper".
 	UserType string `json:"userType"`
+
+	// DeviceFingerprint is an opaque, app-generated device identifier --
+	// purpose is multi-account abuse detection only (e.g. a banned user
+	// re-registering). Stored but never echoed back in any response and
+	// never joined into matching/behavior scoring; see
+	// internal/auth.Service.DeviceFingerprint for the one, audit-logged
+	// read path. Optional: an empty string is stored as-is, so older
+	// clients that don't send one yet don't fail signup.
+	DeviceFingerprint string `json:"deviceFingerprint,omitempty"`
 }
 
 type SignInRequest struct {
