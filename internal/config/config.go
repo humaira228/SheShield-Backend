@@ -35,6 +35,16 @@ type Config struct {
 	// contact's phone browser, so the local-dev default only works when
 	// testing against a device on the same machine/network as the server.
 	PublicBaseURL string
+
+	// AdminAPIKey gates the /api/v1/admin/* moderation routes (see
+	// internal/adminapi + middleware.RequireAdminKey). There is no "admin"
+	// user role/JWT in this app on purpose -- only someone holding this
+	// separate, operator-issued key can reach the queue at all. Empty
+	// (the default) means the admin HTTP surface is disabled entirely;
+	// cmd/api/main.go only registers those routes when this is set, so a
+	// deployment that never sets it behaves exactly as before (CLI-only,
+	// same as cmd/admin always was).
+	AdminAPIKey string
 }
 
 func Load() Config {
@@ -51,6 +61,7 @@ func Load() Config {
 		FCMProjectID:       getEnv("FCM_PROJECT_ID", ""),
 		UploadDir:          getEnv("UPLOAD_DIR", "./data/uploads"),
 		PublicBaseURL:      getEnv("PUBLIC_BASE_URL", "http://localhost:8080"),
+		AdminAPIKey:        os.Getenv("ADMIN_API_KEY"),
 	}
 }
 
