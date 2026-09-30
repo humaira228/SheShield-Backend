@@ -102,6 +102,29 @@ func (r *Repository) ListPending() ([]Review, error) {
 	return out, rows.Err()
 }
 
+// ListAll returns the latest review record for every submitted helper
+// verification, newest first. It is used only by the admin dashboard.
+func (r *Repository) ListAll() ([]Review, error) {
+	rows, err := r.db.Query(`
+		SELECT v.id, v.user_uid, v.status, v.nid_front, v.nid_back, v.selfie, v.note, v.created_at, v.reviewed_at,
+		       u.name, u.email, u.country_code, u.phone, u.user_type
+		FROM helper_verifications v JOIN users u ON u.uid = v.user_uid
+		ORDER BY v.created_at DESC, v.rowid DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Review{}
+	for rows.Next() {
+		rv, err := scanReview(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rv)
+	}
+	return out, rows.Err()
+}
+
 // GetForReview returns one submission with the applicant's details.
 func (r *Repository) GetForReview(id string) (Review, error) {
 	row := r.db.QueryRow(`

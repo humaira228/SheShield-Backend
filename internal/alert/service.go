@@ -183,6 +183,10 @@ func (s *Service) Trigger(ctx context.Context, uid string, req CreateAlertReques
 	// as soon as this handler returns, and a slow/failed push must not delay
 	// the SOS response or appear as a failed "delivery" -- there's no SMS
 	// fallback-free path here, so it's genuinely best-effort.
+	var pushLat, pushLng float64
+	if req.Latitude != nil && req.Longitude != nil {
+		pushLat, pushLng = *req.Latitude, *req.Longitude
+	}
 	for _, c := range contacts {
 		if c.LinkedUserUID == nil {
 			continue
@@ -195,7 +199,7 @@ func (s *Service) Trigger(ctx context.Context, uid string, req CreateAlertReques
 		go func(token string) {
 			pushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := s.pusher.Send(pushCtx, token, user.Name, *req.Latitude, *req.Longitude); err != nil {
+			if err := s.pusher.Send(pushCtx, token, user.Name, pushLat, pushLng); err != nil {
 				log.Printf("alert: push to linked contact failed: %v", err)
 			}
 		}(token)

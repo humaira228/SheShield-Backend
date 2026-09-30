@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"strings"
 	"time"
@@ -56,4 +57,33 @@ func RequireAuth(secret string) func(http.Handler) http.Handler {
 func UIDFromContext(ctx context.Context) (string, bool) {
 	uid, ok := ctx.Value(userUIDKey).(string)
 	return uid, ok
+}
+
+// RequireAdminKey gates the moderation-dashboard routes (internal/adminapi)
+// behind a single static, operator-issued key -- a different, deliberately
+// simpler scheme than RequireAuth's JWTs. There is no "admin" role on the
+// users table; a regular user's Bearer token, however long-lived or
+// privileged the account, is never accepted here. If key is empty (the
+// config default), every request is rejected -- the admin HTTP surface is
+// opt-in, not opt-out, matching cmd/admin's original "no network endpoint
+// unless someone deliberately wires one up" posture.
+//
+// Constant-time comparison (crypto/subtle) so responding to a wrong key
+// takes the same time as a right one -- a timing side-channel is a real
+// attack surface for a single shared secret checked on every request.
+func RequireAdminKey(key string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if key == "" {
+				httpx.Err(w, http.StatusNotFound, "Not found.")
+				return
+			}
+			given := r.Header.Get("X-Admin-Key")
+			if given == "" || subtle.ConstantTimeCompare([]byte(given), []byte(key)) != 1 {
+				httpx.Err(w, http.StatusUnauthorized, "Invalid admin key.")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
