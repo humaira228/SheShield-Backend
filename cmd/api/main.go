@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/zannatulmaliha/sheshield-backend/internal/adminapi"
+	"github.com/zannatulmaliha/sheshield-backend/internal/ai"
 	"github.com/zannatulmaliha/sheshield-backend/internal/alert"
 	"github.com/zannatulmaliha/sheshield-backend/internal/audit"
 	"github.com/zannatulmaliha/sheshield-backend/internal/auth"
@@ -100,6 +101,14 @@ func main() {
 	helperService := helper.NewService(authRepo, helperRepo, helperRepo, matchesRepo).
 		WithMutualConnections(authRepo, contactRepo) // §10: authRepo.IsDiscoverable + contactRepo.AreConnected
 	helper.NewHandler(helperService).Register(mux, cfg.JWTSecret)
+
+	var aiClient ai.Client
+	if cfg.GroqAPIKey != "" {
+		aiClient = ai.NewGroqClient(cfg.GroqAPIKey)
+	} else {
+		log.Println("AI: GROQ_API_KEY not set -- the in-app Ask AI assistant will return a clear error instead of a reply.")
+	}
+	ai.NewHandler(aiClient).Register(mux, cfg.JWTSecret)
 
 	// Admin moderation dashboard (internal/adminapi) -- opt-in only. With
 	// no ADMIN_API_KEY set, none of these routes are registered at all, so
