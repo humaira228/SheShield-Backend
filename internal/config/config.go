@@ -30,6 +30,11 @@ type Config struct {
 	// identity documents: keep it outside anything that is served publicly.
 	UploadDir string
 
+	// GroqAPIKey enables the in-app safety-assistant chat (internal/ai). No
+	// key means the endpoint returns a clear "not configured" error instead
+	// of silently failing.
+	GroqAPIKey string
+
 	// PublicBaseURL prefixes the no-login /track/<token> link sent in SOS
 	// texts, e.g. "https://api.sheshield.example". Must be reachable by a
 	// contact's phone browser, so the local-dev default only works when
@@ -50,6 +55,7 @@ func Load() Config {
 		FCMCredentialsPath: getEnv("FCM_CREDENTIALS_PATH", ""),
 		FCMProjectID:       getEnv("FCM_PROJECT_ID", ""),
 		UploadDir:          getEnv("UPLOAD_DIR", "./data/uploads"),
+		GroqAPIKey:         os.Getenv("GROQ_API_KEY"),
 		PublicBaseURL:      getEnv("PUBLIC_BASE_URL", "http://localhost:8080"),
 	}
 }
