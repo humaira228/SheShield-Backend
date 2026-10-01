@@ -30,6 +30,13 @@ type CreateAlertRequest struct {
 	// on two-party consent law first -- see the spec's §7); this only
 	// persists the consent choice itself.
 	AVConsent bool `json:"avConsent"`
+
+	// Trigger says what fired this SOS: "manual", "voice", or one of the
+	// on-device motion detectors ("motion_fall", "motion_sprint",
+	// "motion_struggle", "motion_inactive", "missed_checkin"). Unknown values
+	// are normalised to "manual" (see internal/trigger). Optional -- older
+	// clients simply omit it.
+	Trigger string `json:"trigger"`
 }
 
 type Delivery struct {
@@ -60,6 +67,8 @@ type Alert struct {
 	ShareURL   string `json:"shareUrl,omitempty"`
 
 	AVConsent bool `json:"avConsent"`
+
+	Trigger string `json:"trigger"`
 }
 
 // UpdateLocationRequest is the PATCH /alerts/{id}/location body, sent

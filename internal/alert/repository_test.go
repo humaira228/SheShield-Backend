@@ -238,3 +238,56 @@ func TestListByUser_OnlyOwnAlertsWithDeliveryCounts(t *testing.T) {
 		t.Errorf("want zero counts for alert2 (no deliveries seeded), got %+v", a2)
 	}
 }
+
+// Once a helper accepts, the requester must still be able to (a) keep
+// sending live location -- helper.SafetyStatus' connectivity signal depends
+// on it -- and (b) mark themselves safe, which also closes the helper's
+// response record.
+func TestAccepted_AlertStillTracksAndResolves(t *testing.T) {
+	conn := openTestDB(t)
+	seedUser(t, conn, "victim1", "Nadia Islam", "1712345678")
+	seedUser(t, conn, "helper1", "Hana", "1700000000")
+	seedAlert(t, conn, "alert1", "victim1", "accepted", "tok-1")
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := conn.Exec(`UPDATE alerts SET accepted_by_uid = 'helper1', accepted_at = ? WHERE id = 'alert1'`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(`INSERT INTO helper_responses (id, alert_id, helper_uid, accepted_at, outcome) VALUES ('r1', 'alert1', 'helper1', ?, 'active')`, now); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := NewRepository(conn)
+	if err := repo.UpdateLocation("alert1", "victim1", f64(23.9), f64(90.5), nil); err != nil {
+		t.Fatalf("accepted alert must keep updating location: %v", err)
+	}
+	if _, err := repo.Resolve("alert1", "victim1"); err != nil {
+		t.Fatalf("requester must be able to resolve an accepted alert: %v", err)
+	}
+
+	var outcome, by string
+	if err := conn.QueryRow(`SELECT outcome FROM helper_responses WHERE id = 'r1'`).Scan(&outcome); err != nil || outcome != "resolved" {
+		t.Errorf("helper response outcome = %q err=%v", outcome, err)
+	}
+	if err := conn.QueryRow(`SELECT resolved_by FROM alerts WHERE id = 'alert1'`).Scan(&by); err != nil || by != "requester" {
+		t.Errorf("resolved_by = %q err=%v", by, err)
+	}
+}
+
+func TestSave_PersistsNormalisedTrigger(t *testing.T) {
+	conn := openTestDB(t)
+	seedUser(t, conn, "victim1", "Nadia Islam", "1712345678")
+	repo := NewRepository(conn)
+	now := time.Now().UTC()
+	for id, in := range map[string]string{"a1": "motion_fall", "a2": "garbage", "a3": ""} {
+		if err := repo.Save(Alert{ID: id, UserUID: "victim1", CreatedAt: now, UpdatedAt: now, Trigger: in}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := map[string]string{"a1": "motion_fall", "a2": "manual", "a3": "manual"}
+	for id, w := range want {
+		var got string
+		if err := conn.QueryRow(`SELECT trigger_type FROM alerts WHERE id = ?`, id).Scan(&got); err != nil || got != w {
+			t.Errorf("%s: trigger_type = %q, want %q (err %v)", id, got, w, err)
+		}
+	}
+}

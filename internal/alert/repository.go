@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"time"
+
+	"github.com/zannatulmaliha/sheshield-backend/internal/trigger"
 )
 
 // ErrNotFound covers "no such alert" and "alert belongs to someone else" --
@@ -86,10 +88,10 @@ func (r *Repository) Save(a Alert) error {
 	at := a.CreatedAt.Format(time.RFC3339)
 	updatedAt := a.UpdatedAt.Format(time.RFC3339)
 	if _, err := tx.Exec(`
-		INSERT INTO alerts (id, user_uid, latitude, longitude, accuracy_m, created_at, share_token, updated_at, av_consent)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO alerts (id, user_uid, latitude, longitude, accuracy_m, created_at, share_token, updated_at, av_consent, trigger_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.UserUID, nullable(a.Latitude), nullable(a.Longitude), nullable(a.AccuracyMeters), at,
-		nullableString(a.ShareToken), updatedAt, a.AVConsent,
+		nullableString(a.ShareToken), updatedAt, a.AVConsent, trigger.Normalize(a.Trigger),
 	); err != nil {
 		return err
 	}
@@ -126,14 +128,16 @@ func (r *Repository) notActiveOrNotFound(alertID, ownerUID string) error {
 
 // UpdateLocation refreshes an active alert's last-known position, e.g. from
 // the app's periodic PATCH while an SOS is in progress. Only the alert's own
-// owner can move it, and only while it is still 'active' -- once resolved or
-// accepted, the location is frozen.
+// owner can move it, and only while it is 'active' or 'accepted' -- a
+// helper who accepted needs the LIVE position (and the connectivity-lost
+// signal in helper.SafetyStatus is computed from this very updated_at), so
+// accepting must not freeze it. Once resolved the location is frozen.
 func (r *Repository) UpdateLocation(alertID, ownerUID string, lat, lng, accuracy *float64) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := r.db.Exec(`
 		UPDATE alerts
 		SET latitude = ?, longitude = ?, accuracy_m = ?, updated_at = ?
-		WHERE id = ? AND user_uid = ? AND status = 'active'`,
+		WHERE id = ? AND user_uid = ? AND status IN ('active', 'accepted')`,
 		nullable(lat), nullable(lng), nullable(accuracy), now, alertID, ownerUID,
 	)
 	if err != nil {
@@ -169,7 +173,7 @@ func (r *Repository) Resolve(alertID, ownerUID string) (bool, error) {
 
 	var createdAtStr string
 	err = tx.QueryRow(
-		`SELECT created_at FROM alerts WHERE id = ? AND user_uid = ? AND status = 'active'`,
+		`SELECT created_at FROM alerts WHERE id = ? AND user_uid = ? AND status IN ('active', 'accepted')`,
 		alertID, ownerUID,
 	).Scan(&createdAtStr)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -188,9 +192,19 @@ func (r *Repository) Resolve(alertID, ownerUID string) (bool, error) {
 	now := time.Now().UTC()
 	nowStr := now.Format(time.RFC3339)
 	if _, err := tx.Exec(`
-		UPDATE alerts SET status = 'resolved', resolved_at = ?, updated_at = ?
+		UPDATE alerts SET status = 'resolved', resolved_at = ?, updated_at = ?, resolved_by = 'requester'
 		WHERE id = ?`,
 		nowStr, nowStr, alertID,
+	); err != nil {
+		return false, err
+	}
+	// Close the accepting helper's response record (their History row) and
+	// their access with it -- the helper endpoints all require status
+	// 'accepted', so resolving revokes them server-side.
+	if _, err := tx.Exec(`
+		UPDATE helper_responses SET outcome = 'resolved', ended_at = ?
+		WHERE alert_id = ? AND outcome = 'active'`,
+		nowStr, alertID,
 	); err != nil {
 		return false, err
 	}

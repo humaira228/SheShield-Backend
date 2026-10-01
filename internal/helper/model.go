@@ -55,6 +55,14 @@ type NearbyAlert struct {
 	// see the spec's §10. False, never omitted, when either opt-in is off,
 	// so the client never has to guess whether it was computed.
 	MutualConnection bool `json:"mutualConnection"`
+
+	// Trigger/Label/RiskLevel/DuressActive describe WHAT is happening without
+	// revealing WHO (spec §3: pre-accept helpers see area + type only).
+	// RiskLevel is "high" | "medium", derived in internal/trigger.
+	Trigger      string `json:"trigger"`
+	Label        string `json:"label"`
+	RiskLevel    string `json:"riskLevel"`
+	DuressActive bool   `json:"duressActive"`
 }
 
 // AcceptedAlert is the full detail, returned only to the one helper who wins
@@ -79,4 +87,7 @@ type activeAlert struct {
 	Latitude  *float64
 	Longitude *float64
 	CreatedAt time.Time
+
+	Trigger      string
+	DuressActive bool
 }
