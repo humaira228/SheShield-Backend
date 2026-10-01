@@ -13,6 +13,7 @@ import (
 	"github.com/zannatulmaliha/sheshield-backend/internal/contact"
 	"github.com/zannatulmaliha/sheshield-backend/internal/duress"
 	"github.com/zannatulmaliha/sheshield-backend/internal/sms"
+	"github.com/zannatulmaliha/sheshield-backend/internal/trigger"
 )
 
 var (
@@ -218,6 +219,7 @@ func (s *Service) Trigger(ctx context.Context, uid string, req CreateAlertReques
 		ShareURL:       trackingURL,
 		Deliveries:     deliveries,
 		AVConsent:      req.AVConsent,
+		Trigger:        trigger.Normalize(req.Trigger),
 	}
 
 	// The texts have already gone out, so a database problem must not hide

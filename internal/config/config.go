@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 )
 
 // Config holds everything the app reads from the environment. Nothing here
@@ -50,24 +51,30 @@ type Config struct {
 	// deployment that never sets it behaves exactly as before (CLI-only,
 	// same as cmd/admin always was).
 	AdminAPIKey string
+
+	// MotionRetentionDays is how long derived motion events (fall/sprint/
+	// struggle) are kept before the nightly purge deletes them (spec §13:
+	// defined retention windows). Default 30.
+	MotionRetentionDays int
 }
 
 func Load() Config {
 	loadDotEnv(".env")
 	return Config{
-		Port:               getEnv("PORT", "8080"),
-		DBPath:             getEnv("DB_PATH", "./data/sheshield.db"),
-		JWTSecret:          os.Getenv("JWT_SECRET"),
-		JWTTTLHours:        24 * 7, // 7 days, matches a typical "stay signed in" mobile app
-		CORSOrigin:         getEnv("CORS_ORIGIN", "*"),
-		SMSProvider:        getEnv("SMS_PROVIDER", "log"),
-		PushProvider:       getEnv("PUSH_PROVIDER", "log"),
-		FCMCredentialsPath: getEnv("FCM_CREDENTIALS_PATH", ""),
-		FCMProjectID:       getEnv("FCM_PROJECT_ID", ""),
-		UploadDir:          getEnv("UPLOAD_DIR", "./data/uploads"),
-		GroqAPIKey:         os.Getenv("GROQ_API_KEY"),
-		PublicBaseURL:      getEnv("PUBLIC_BASE_URL", "http://localhost:8080"),
-		AdminAPIKey:        os.Getenv("ADMIN_API_KEY"),
+		Port:                getEnv("PORT", "8080"),
+		DBPath:              getEnv("DB_PATH", "./data/sheshield.db"),
+		JWTSecret:           os.Getenv("JWT_SECRET"),
+		JWTTTLHours:         24 * 7, // 7 days, matches a typical "stay signed in" mobile app
+		CORSOrigin:          getEnv("CORS_ORIGIN", "*"),
+		SMSProvider:         getEnv("SMS_PROVIDER", "log"),
+		PushProvider:        getEnv("PUSH_PROVIDER", "log"),
+		FCMCredentialsPath:  getEnv("FCM_CREDENTIALS_PATH", ""),
+		FCMProjectID:        getEnv("FCM_PROJECT_ID", ""),
+		UploadDir:           getEnv("UPLOAD_DIR", "./data/uploads"),
+		GroqAPIKey:          os.Getenv("GROQ_API_KEY"),
+		PublicBaseURL:       getEnv("PUBLIC_BASE_URL", "http://localhost:8080"),
+		AdminAPIKey:         os.Getenv("ADMIN_API_KEY"),
+		MotionRetentionDays: getEnvInt("MOTION_RETENTION_DAYS", 30),
 	}
 }
 
@@ -76,4 +83,13 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getEnvInt reads a positive integer from the environment, falling back to
+// def when it is unset, malformed or not positive.
+func getEnvInt(key string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(key)); err == nil && v > 0 {
+		return v
+	}
+	return def
 }

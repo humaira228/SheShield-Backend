@@ -16,10 +16,12 @@ import (
 	"github.com/zannatulmaliha/sheshield-backend/internal/duress"
 	"github.com/zannatulmaliha/sheshield-backend/internal/helper"
 	"github.com/zannatulmaliha/sheshield-backend/internal/matching"
+	"github.com/zannatulmaliha/sheshield-backend/internal/motion"
 	"github.com/zannatulmaliha/sheshield-backend/internal/push"
 	"github.com/zannatulmaliha/sheshield-backend/internal/ratelimit"
 	"github.com/zannatulmaliha/sheshield-backend/internal/report"
 	"github.com/zannatulmaliha/sheshield-backend/internal/sms"
+	"github.com/zannatulmaliha/sheshield-backend/internal/sosmsg"
 	"github.com/zannatulmaliha/sheshield-backend/internal/verification"
 )
 
@@ -99,8 +101,29 @@ func main() {
 
 	helperRepo := helper.NewRepository(conn)
 	helperService := helper.NewService(authRepo, helperRepo, helperRepo, matchesRepo).
-		WithMutualConnections(authRepo, contactRepo) // §10: authRepo.IsDiscoverable + contactRepo.AreConnected
+		WithMutualConnections(authRepo, contactRepo). // §10: authRepo.IsDiscoverable + contactRepo.AreConnected
+		WithResponses(helperRepo)                     // live position, progress, resolve, stats, history
 	helper.NewHandler(helperService).Register(mux, cfg.JWTSecret)
+
+	// Movement detection: the phone runs the detectors on-device and reports
+	// only derived events here (internal/motion). Old events are purged on a
+	// schedule so nothing is kept longer than the retention window.
+	motionRepo := motion.NewRepository(conn)
+	motion.NewHandler(motionRepo).Register(mux, cfg.JWTSecret)
+	go func() {
+		retention := time.Duration(cfg.MotionRetentionDays) * 24 * time.Hour
+		for {
+			if n, err := motionRepo.PurgeOlderThan(time.Now().UTC().Add(-retention)); err != nil {
+				log.Printf("motion: purge failed: %v", err)
+			} else if n > 0 {
+				log.Printf("motion: purged %d events older than %d days", n, cfg.MotionRetentionDays)
+			}
+			time.Sleep(6 * time.Hour)
+		}
+	}()
+
+	// In-app requester <-> helper chat (relay-free "in-app contact only").
+	sosmsg.NewHandler(sosmsg.NewRepository(conn)).Register(mux, cfg.JWTSecret)
 
 	var aiClient ai.Client
 	if cfg.GroqAPIKey != "" {

@@ -31,6 +31,7 @@ func (h *Handler) Register(mux *http.ServeMux, jwtSecret string) {
 	mux.Handle("POST /api/v1/helper/alerts/{id}/accept", auth(http.HandlerFunc(h.accept)))
 	mux.Handle("POST /api/v1/helper/alerts/{id}/release", auth(http.HandlerFunc(h.release)))
 	mux.Handle("GET /api/v1/helper/alerts/{id}/safety-status", auth(http.HandlerFunc(h.safetyStatus)))
+	h.registerResponses(mux, auth)
 }
 
 func writeSvcError(w http.ResponseWriter, err error) {
@@ -43,7 +44,8 @@ func writeSvcError(w http.ResponseWriter, err error) {
 		httpx.Err(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotActive):
 		httpx.Err(w, http.StatusConflict, err.Error())
-	case errors.Is(err, ErrNotYourMatch):
+	case errors.Is(err, ErrNotYourMatch), errors.Is(err, ErrBadProgress),
+		errors.Is(err, ErrNeedArrival), errors.Is(err, ErrDuressBlocksResolve):
 		httpx.Err(w, http.StatusConflict, err.Error())
 	default:
 		httpx.Err(w, http.StatusInternalServerError, "Something went wrong. Please try again.")

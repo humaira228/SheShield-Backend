@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/zannatulmaliha/sheshield-backend/internal/auth"
+	"github.com/zannatulmaliha/sheshield-backend/internal/trigger"
 )
 
 var (
@@ -67,6 +68,7 @@ type Service struct {
 	matches      Matches
 	discoverable DiscoverabilityStore
 	connections  ConnectionStore
+	responses    ResponseStore
 	now          func() time.Time
 }
 
@@ -221,12 +223,17 @@ func (s *Service) NearbyAlerts(uid string) ([]NearbyAlert, error) {
 			continue
 		}
 
+		trig := trigger.Normalize(a.Trigger)
 		out = append(out, NearbyAlert{
 			ID:               a.ID,
 			RoughArea:        "Nearby",
 			DistanceMeters:   dist,
 			CreatedAt:        a.CreatedAt,
 			MutualConnection: s.mutualConnection(st.MutualConnectionOptIn, uid, a.UserUID),
+			Trigger:          trig,
+			Label:            trigger.Label(trig),
+			RiskLevel:        trigger.Risk(trig, a.DuressActive),
+			DuressActive:     a.DuressActive,
 		})
 
 		// Best-effort match tracking.

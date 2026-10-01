@@ -80,9 +80,10 @@ func (r *Repository) SetStatus(uid string, s Status) error {
 // helper's radius, so they're excluded here rather than filtered later.
 func (r *Repository) ActiveAlerts() ([]activeAlert, error) {
 	rows, err := r.db.Query(`
-		SELECT id, user_uid, latitude, longitude, created_at
-		FROM alerts
-		WHERE status = 'active' AND latitude IS NOT NULL AND longitude IS NOT NULL`)
+		SELECT a.id, a.user_uid, a.latitude, a.longitude, a.created_at, a.trigger_type,
+			EXISTS (SELECT 1 FROM duress_signals d WHERE d.sos_id = a.id)
+		FROM alerts a
+		WHERE a.status = 'active' AND a.latitude IS NOT NULL AND a.longitude IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +94,7 @@ func (r *Repository) ActiveAlerts() ([]activeAlert, error) {
 		var a activeAlert
 		var lat, lng float64
 		var createdAt string
-		if err := rows.Scan(&a.ID, &a.UserUID, &lat, &lng, &createdAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.UserUID, &lat, &lng, &createdAt, &a.Trigger, &a.DuressActive); err != nil {
 			return nil, err
 		}
 		a.Latitude, a.Longitude = &lat, &lng
@@ -156,6 +157,15 @@ func (r *Repository) Accept(alertID, helperUID string, now time.Time) (acceptedR
 		return acceptedRow{}, false, err
 	}
 
+	// Durable record for the helper's History/stats -- see 016 migration.
+	if _, err := tx.Exec(`
+		INSERT INTO helper_responses (id, alert_id, helper_uid, trigger_type, accepted_at, outcome)
+		SELECT ?, id, ?, trigger_type, ?, 'active' FROM alerts WHERE id = ?`,
+		newID(), helperUID, now.UTC().Format(time.RFC3339), alertID,
+	); err != nil {
+		return acceptedRow{}, false, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return acceptedRow{}, false, err
 	}
@@ -170,7 +180,8 @@ func (r *Repository) Accept(alertID, helperUID string, now time.Time) (acceptedR
 func (r *Repository) Release(alertID, helperUID string, now time.Time) error {
 	res, err := r.db.Exec(`
 		UPDATE alerts
-		SET status = 'active', accepted_by_uid = NULL, accepted_at = NULL, updated_at = ?
+		SET status = 'active', accepted_by_uid = NULL, accepted_at = NULL, updated_at = ?,
+			helper_progress = NULL, helper_progress_at = NULL
 		WHERE id = ? AND accepted_by_uid = ? AND status = 'accepted'`,
 		now.UTC().Format(time.RFC3339), alertID, helperUID,
 	)
@@ -184,7 +195,12 @@ func (r *Repository) Release(alertID, helperUID string, now time.Time) error {
 		// id doesn't exist.
 		return ErrNotYourMatch
 	}
-	return nil
+	_, err = r.db.Exec(`
+		UPDATE helper_responses SET outcome = 'released', ended_at = ?
+		WHERE alert_id = ? AND helper_uid = ? AND outcome = 'active'`,
+		now.UTC().Format(time.RFC3339), alertID, helperUID,
+	)
+	return err
 }
 
 // safetyConnectivityLostAfter mirrors internal/alert's
