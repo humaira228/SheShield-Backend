@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/zannatulmaliha/sheshield-backend/internal/trigger"
@@ -294,6 +295,112 @@ func (r *Repository) ListByUser(uid string) ([]AlertSummary, error) {
 		return nil, err
 	}
 	return summaries, nil
+}
+
+// Grid parameters for Heatmap. zoneCellDeg is ~1.1km at the equator -- fine
+// for a visual heat map, not navigation-grade (the rest of this package
+// already accepts the same tolerance for location data). zoneMediumAt/
+// zoneHighAt are alert-count thresholds, not trigger.Risk: that returns
+// "high" for almost every trigger type, so it is a poor signal for a
+// geographic tier -- density of past alerts is the real signal here.
+const (
+	zoneCellDeg     = 0.01
+	zoneMinRadiusKm = 1
+	zoneMaxRadiusKm = 15
+	zoneMediumAt    = 1
+	zoneHighAt      = 3
+)
+
+// kmPerDegreeLat is a constant approximation; the longitude equivalent
+// shrinks toward the poles, so it is computed per call from centerLat.
+const kmPerDegreeLat = 111.0
+
+func zoneRisk(alertCount int) string {
+	switch {
+	case alertCount >= zoneHighAt:
+		return ZoneRiskHigh
+	case alertCount >= zoneMediumAt:
+		return ZoneRiskMedium
+	default:
+		return ZoneRiskLow
+	}
+}
+
+// Heatmap tiles the area around (centerLat, centerLng) into a grid of
+// ~1.1km cells and classifies each by how many past alerts (at any time,
+// resolved or not -- a past incident is still a signal about the area) fall
+// inside it. Every cell in the grid is returned, including zero-count ones
+// as ZoneRiskLow, so the result covers the whole area, not just where
+// alerts happened to occur -- that is what makes this read as a heat map
+// rather than a few isolated markers.
+func (r *Repository) Heatmap(centerLat, centerLng, radiusKm float64) ([]DangerZone, error) {
+	if radiusKm < zoneMinRadiusKm {
+		radiusKm = zoneMinRadiusKm
+	}
+	if radiusKm > zoneMaxRadiusKm {
+		radiusKm = zoneMaxRadiusKm
+	}
+
+	latSpan := radiusKm / kmPerDegreeLat
+	kmPerDegreeLng := kmPerDegreeLat * math.Cos(centerLat*math.Pi/180)
+	if kmPerDegreeLng < 1 {
+		kmPerDegreeLng = 1 // guards the grid size near the poles
+	}
+	lngSpan := radiusKm / kmPerDegreeLng
+
+	minLat, maxLat := centerLat-latSpan, centerLat+latSpan
+	minLng, maxLng := centerLng-lngSpan, centerLng+lngSpan
+
+	rows, err := r.db.Query(`
+		SELECT ROUND(latitude, 2), ROUND(longitude, 2), COUNT(*)
+		FROM alerts
+		WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
+		GROUP BY ROUND(latitude, 2), ROUND(longitude, 2)`,
+		minLat, maxLat, minLng, maxLng,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Cell keys are grid indices (coordinate / zoneCellDeg, rounded to the
+	// nearest int), not raw floats -- floating point equality between
+	// SQLite's ROUND() and Go's math.Round() can't be relied on.
+	type cellKey struct{ latIdx, lngIdx int64 }
+	counts := map[cellKey]int{}
+	for rows.Next() {
+		var lat, lng float64
+		var n int
+		if err := rows.Scan(&lat, &lng, &n); err != nil {
+			return nil, err
+		}
+		counts[cellKey{
+			latIdx: int64(math.Round(lat / zoneCellDeg)),
+			lngIdx: int64(math.Round(lng / zoneCellDeg)),
+		}] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	minLatIdx := int64(math.Floor(minLat / zoneCellDeg))
+	maxLatIdx := int64(math.Ceil(maxLat / zoneCellDeg))
+	minLngIdx := int64(math.Floor(minLng / zoneCellDeg))
+	maxLngIdx := int64(math.Ceil(maxLng / zoneCellDeg))
+
+	zones := make([]DangerZone, 0, (maxLatIdx-minLatIdx+1)*(maxLngIdx-minLngIdx+1))
+	for latIdx := minLatIdx; latIdx <= maxLatIdx; latIdx++ {
+		for lngIdx := minLngIdx; lngIdx <= maxLngIdx; lngIdx++ {
+			n := counts[cellKey{latIdx, lngIdx}]
+			zones = append(zones, DangerZone{
+				Latitude:   float64(latIdx) * zoneCellDeg,
+				Longitude:  float64(lngIdx) * zoneCellDeg,
+				RiskLevel:  zoneRisk(n),
+				AlertCount: n,
+			})
+		}
+	}
+	return zones, nil
 }
 
 // connectivityLostAfter: no location update in this long while the SOS is

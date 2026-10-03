@@ -31,6 +31,7 @@ Check it's up: open http://localhost:8080/health -- it should say `ok`.
 | POST   | `/api/v1/contacts`    | yes  | `{name,relation?,phone,countryCode}` — phone is digits only (6-15), countryCode like `+880`; max 10 per user, no duplicate numbers |
 | DELETE | `/api/v1/contacts/{id}` | yes | —                                                                  |
 | POST   | `/api/v1/alerts`      | yes  | `{latitude?,longitude?,accuracyMeters?,notifiedByDevice?}` — `notifiedByDevice` = contact ids the phone already texted from its own SIM; the server texts the rest. Returns per-contact `deliveries` with `status` `sent`/`simulated`/`failed` |
+| GET    | `/api/v1/alerts/heatmap` | yes | query: `lat,lng,radiusKm?` (default 5, clamped 1-15) — the home screen's "Danger Zone" heat map: every ~1.1km cell in range, each `{latitude,longitude,riskLevel,alertCount}` by how many past alerts fell in it (`low`/`medium`/`high`), never per-alert locations |
 | PATCH  | `/api/v1/auth/me`     | yes  | `{name?,phone?,countryCode?,address?}` — only these fields; email, gender, role and verified status cannot be changed here |
 | POST   | `/api/v1/verification` | yes | multipart: `nidFront`, `nidBack`, `selfie` (JPEG/PNG, 5 MB each). Helper accounts only. Creates a *pending* request |
 | GET    | `/api/v1/verification` | yes | `{status: none\|pending\|approved\|rejected, note?, submittedAt?}` |
