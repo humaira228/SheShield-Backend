@@ -98,6 +98,25 @@ type AlertSummary struct {
 	TotalCount  int        `json:"totalCount"`
 }
 
+// Risk tiers for Heatmap, assigned by alert count in a ~1.1km grid cell
+// (see Repository.Heatmap) -- not by trigger.Risk, which returns "high" for
+// almost every trigger type and so is a poor signal for a geographic tier.
+const (
+	ZoneRiskLow    = "low"
+	ZoneRiskMedium = "medium"
+	ZoneRiskHigh   = "high"
+)
+
+// DangerZone is one grid cell of the Danger Zone heat map. Never a raw
+// per-alert location (see AlertSummary above): AlertCount is how many past
+// alerts fell in this ~1.1km cell, never which ones or whose.
+type DangerZone struct {
+	Latitude   float64 `json:"latitude"`  // cell center
+	Longitude  float64 `json:"longitude"` // cell center
+	RiskLevel  string  `json:"riskLevel"`
+	AlertCount int     `json:"alertCount"`
+}
+
 // PublicAlertView is everything the no-login tracking page may show a
 // contact: enough to render a live map and know the SOS is still ongoing,
 // nothing that could identify the sender beyond a first name -- no phone

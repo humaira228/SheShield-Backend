@@ -87,6 +87,10 @@ func (f *fakeStore) ListByUser(uid string) ([]AlertSummary, error) {
 	return f.list, nil
 }
 
+func (f *fakeStore) Heatmap(centerLat, centerLng, radiusKm float64) ([]DangerZone, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) RequesterFor(sosID string) (string, error) {
 	return f.requesterUID, f.requesterUIDErr
 }

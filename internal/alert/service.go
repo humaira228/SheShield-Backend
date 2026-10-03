@@ -45,6 +45,7 @@ type Store interface {
 	Resolve(alertID, ownerUID string) (wasQuickCancel bool, err error)
 	GetByShareToken(token string) (*PublicAlertView, error)
 	ListByUser(uid string) ([]AlertSummary, error)
+	Heatmap(centerLat, centerLng, radiusKm float64) ([]DangerZone, error)
 	RequesterFor(sosID string) (string, error)
 	CurrentLocation(sosID string) (lat, lng *float64, err error)
 }
@@ -366,6 +367,12 @@ func (s *Service) notifyDuress(uid string, lat, lng *float64) {
 // notification-history list in the app.
 func (s *Service) ListMine(uid string) ([]AlertSummary, error) {
 	return s.store.ListByUser(uid)
+}
+
+// Heatmap returns the Danger Zone grid around (lat, lng) -- see
+// Repository.Heatmap for the grid/risk-tier logic.
+func (s *Service) Heatmap(lat, lng, radiusKm float64) ([]DangerZone, error) {
+	return s.store.Heatmap(lat, lng, radiusKm)
 }
 
 // PublicView returns what the no-login tracking page may show for a share

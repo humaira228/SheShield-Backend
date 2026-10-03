@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/zannatulmaliha/sheshield-backend/internal/duress"
 	"github.com/zannatulmaliha/sheshield-backend/internal/httpx"
@@ -25,6 +26,7 @@ func (h *Handler) Register(mux *http.ServeMux, jwtSecret string) {
 	mux.Handle("PATCH /api/v1/alerts/{id}/location", auth(http.HandlerFunc(h.updateLocation)))
 	mux.Handle("PATCH /api/v1/alerts/{id}/resolve", auth(http.HandlerFunc(h.resolve)))
 	mux.Handle("POST /api/v1/alerts/{id}/duress", auth(http.HandlerFunc(h.triggerDuress)))
+	mux.Handle("GET /api/v1/alerts/heatmap", auth(http.HandlerFunc(h.heatmap)))
 }
 
 // RegisterPublic wires the routes a trusted contact opens with no login: the
@@ -75,6 +77,37 @@ func (h *Handler) listMine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, alerts)
+}
+
+const defaultHeatmapRadiusKm = 5
+
+// heatmap returns the Danger Zone grid around the given point, for the
+// home screen's "Danger Zone" quick action. lat/lng are required (400
+// without them); radiusKm is optional and falls back to
+// defaultHeatmapRadiusKm when absent or unparseable -- Repository.Heatmap
+// clamps it to a sane range either way.
+func (h *Handler) heatmap(w http.ResponseWriter, r *http.Request) {
+	lat, err := strconv.ParseFloat(r.URL.Query().Get("lat"), 64)
+	if err != nil {
+		httpx.Err(w, http.StatusBadRequest, "A valid lat is required.")
+		return
+	}
+	lng, err := strconv.ParseFloat(r.URL.Query().Get("lng"), 64)
+	if err != nil {
+		httpx.Err(w, http.StatusBadRequest, "A valid lng is required.")
+		return
+	}
+	radiusKm, err := strconv.ParseFloat(r.URL.Query().Get("radiusKm"), 64)
+	if err != nil {
+		radiusKm = defaultHeatmapRadiusKm
+	}
+
+	zones, err := h.svc.Heatmap(lat, lng, radiusKm)
+	if err != nil {
+		httpx.Err(w, http.StatusInternalServerError, "Could not load danger zones.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, zones)
 }
 
 // writeTrackingError maps the sentinel errors UpdateLocation/Resolve can
